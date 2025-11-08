@@ -3,10 +3,12 @@
 Simple cli tool for Nextcloud Deck
 
 ## Usage:
+```
 nextcloud-deck-cli.py [-h] [--url URL] [-u USERNAME] [-p PASSWORD] [-b BOARD_ID] [--include-archived] [--json] [--color] [--pango] [--markdown] [--show-owner]
                              [--date-format {iso,local,relative}]
 
 List Nextcloud Deck cards from a board, grouped by lists (stacks).
+
 
 options:
   -h, --help            show this help message and exit
@@ -25,3 +27,4 @@ options:
   --show-owner          Show card owner (default off in non-JSON modes)
   --date-format {iso,local,relative}
                         How to display due dates (default: relative)
+```
