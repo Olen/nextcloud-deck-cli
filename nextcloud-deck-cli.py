@@ -80,7 +80,14 @@ def build_grouped_model(stacks: List[Dict[str, Any]], include_archived: bool) ->
                     "duedate": parse_duedate(c.get("duedate")),
                     "owner": fmt_user(c.get("owner")) or None,
                     "assignees": [fmt_user(u) for u in (c.get("assignedUsers") or []) if fmt_user(u)],
-                    "labels": [lb.get("title","") for lb in (c.get("labels") or []) if lb.get("title")],
+                    "labels": [
+                        {
+                            "title": lb.get("title", ""),
+                            "color": normalize_hex_color(lb.get("color")),
+                        }
+                        for lb in (c.get("labels") or [])
+                        if lb.get("title")
+                    ],
                 }
                 for c in sorted(cards, key=lambda x: x.get("order", 0))
             ]
@@ -146,8 +153,44 @@ class Ansi:
     CYAN = "\033[36m"
     GRAY = "\033[90m"
 
+def normalize_hex_color(c: Optional[str]) -> Optional[str]:
+    """
+    Normalize Deck's label hex color string to 6-char lowercase RGB.
+    Handles:
+      - "31CC7C" / "92e314"
+      - with leading '#' (stripped)
+      - 8-char ARGB/RGBA -> drop the first 2 bytes (alpha)
+    """
+    if not c:
+        return None
+    s = c.strip().lstrip("#")
+    if len(s) == 3:  # short rgb, e.g. "abc"
+        s = "".join(ch * 2 for ch in s)
+    elif len(s) == 8:  # argb or rgba, drop alpha
+        s = s[2:]
+    if len(s) != 6:
+        return None
+    try:
+        int(s, 16)
+    except ValueError:
+        return None
+    return s.lower()
+
+def hex_to_rgb(s: str) -> tuple[int, int, int]:
+    return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+
+def ansi_label(label: Dict[str, Any]) -> str:
+    """Render a label title with 24-bit ANSI color if available."""
+    title = label.get("title") or ""
+    hexcol = label.get("color")
+    if not hexcol:
+        return title
+    r, g, b = hex_to_rgb(hexcol)
+    return f"\033[38;2;{r};{g};{b}m{title}{Ansi.RESET}"
+
+
 def colorize_output(grouped: List[Dict[str, Any]], show_owner: bool, datefmt: str) -> str:
-    E_STACK, E_CARD, E_LABEL, E_OWNER, E_ASSIGNEES, E_DUE, E_ARCH = "🗂️", "📝", "🏷️", "👤", "👥", "📅", "📦"
+    E_STACK, E_CARD, E_LABEL, E_OWNER, E_ASSIGNEES, E_DUE, E_ARCH, E_TODO, E_DONE = "🗂️", "📝", "🏷️", "👤", "👥", "📅", "📦", "✔️ ", "✅"
     lines: List[str] = []
     for block in grouped:
         st = block["stack"]
@@ -157,9 +200,16 @@ def colorize_output(grouped: List[Dict[str, Any]], show_owner: bool, datefmt: st
             lines.append(f"{Ansi.DIM}(no cards){Ansi.RESET}")
             continue
         for c in cards:
-            line = f"- {Ansi.BOLD}{E_CARD} {c['title'] or '(untitled)'}{Ansi.RESET}"
+            if st.get("title").lower() == "todo" or st.get("title").lower() == "to do":
+                icon = E_TODO
+            elif st.get("title").lower() == "done":
+                icon = E_DONE
+            else:
+                icon = E_CARD
+            line = f"- {Ansi.BOLD}{icon} {c['title'] or '(untitled)'}{Ansi.RESET}"
             if c.get("labels"):
-                line += f"  {Ansi.MAGENTA}{E_LABEL} {', '.join(c['labels'])}{Ansi.RESET}"
+                rendered_labels = ", ".join(ansi_label(lb) for lb in c["labels"])
+                line += f"  {E_LABEL}  {rendered_labels}"
             if show_owner and c.get("owner"):
                 line += f"  {Ansi.CYAN}{E_OWNER} {c['owner']}{Ansi.RESET}"
             if c.get("assignees"):
@@ -184,7 +234,15 @@ def markdown_output(grouped: List[Dict[str, Any]], show_owner: bool, datefmt: st
             line = f"- **{c['title'] or '(untitled)'}**"
             meta = []
             if c.get("labels"):
-                meta.append(f"labels: {', '.join(c['labels'])}")
+                label_chunks = []
+                for lb in c["labels"]:
+                    title = lb.get("title") or ""
+                    color = lb.get("color")
+                    if color:
+                        label_chunks.append(f"<span style=\"color:#{color}\">{title}</span>")
+                    else:
+                        label_chunks.append(title)
+                meta.append(f"labels: {', '.join(label_chunks)}")
             if show_owner and c.get("owner"):
                 meta.append(f"owner: {c['owner']}")
             if c.get("assignees"):
@@ -201,6 +259,14 @@ def markdown_output(grouped: List[Dict[str, Any]], show_owner: bool, datefmt: st
 
 def pango_escape(text: str) -> str:
     return html.escape(text, quote=True)
+
+def pango_label(label: Dict[str, Any]) -> str:
+    title = pango_escape(label.get("title") or "")
+    color = label.get("color")
+    if color:
+        return f"<span foreground='#{color}'>{title}</span>"
+    else:
+        return title
 
 def pango_output(grouped: List[Dict[str, Any]], show_owner: bool, datefmt: str) -> str:
     lines: List[str] = []
@@ -222,7 +288,7 @@ def pango_output(grouped: List[Dict[str, Any]], show_owner: bool, datefmt: str) 
                 line = f"📝 {t}"
             meta = []
             if c.get("labels"):
-                meta.append(f"<span foreground='#a371f7'>🏷️ {pango_escape(', '.join(c['labels']))}</span>")
+                meta.append("🏷️ " + ", ".join(pango_label(lb) for lb in c["labels"]))
             if show_owner and c.get("owner"):
                 meta.append(f"<span foreground='#58a6ff'>👤 {pango_escape(c['owner'])}</span>")
             if c.get("assignees"):
