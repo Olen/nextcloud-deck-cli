@@ -5,14 +5,14 @@ import os
 import requests  # just for catching RequestException
 import sys
 
-from nextcloud_deck_core import DeckClient
+from olen_deck import DeckClient
 """
 Tiny Nextcloud Deck CLI "todo" helper.
 
 Operations:
 
   todo --add   "Task title"
-    -> create a new card in the "To do" stack
+    -> create a new card in the "Todo" stack
 
   todo --doing "Task title"
     -> move card with that title to the "Doing" stack
@@ -21,7 +21,7 @@ Operations:
     -> move card with that title to the "Done" stack
 
   todo --do    "Task title"
-    -> move card with that title back to the "To do" stack
+    -> move card with that title back to the "Todo" stack
 
 Stack names are configurable via:
   TODO_STACK_NAME, DOING_STACK_NAME, DONE_STACK_NAME
@@ -62,7 +62,7 @@ def main() -> None:
 
     # Stack names
     parser.add_argument(
-        "--todo-name", default=env("TODO_STACK_NAME", "To do"), help='Name of "To do" stack'
+        "--todo-name", default=env("TODO_STACK_NAME", "Todo"), help='Name of "Todo" stack'
     )
     parser.add_argument(
         "--doing-name", default=env("DOING_STACK_NAME", "Doing"), help='Name of "Doing" stack'
@@ -72,14 +72,14 @@ def main() -> None:
     )
 
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--add", metavar="TITLE", help='Add new card to "To do" stack')
+    group.add_argument("--add", metavar="TITLE", help='Add new card to "Todo" stack')
     group.add_argument("--doing", metavar="TITLE", help='Move card to "Doing" stack')
     group.add_argument("--done", metavar="TITLE", help='Move card to "Done" stack')
     group.add_argument(
         "--do",
         metavar="TITLE",
         dest="todo_move",
-        help='Move card back to "To do" stack',
+        help='Move card back to "Todo" stack',
     )
 
     args = parser.parse_args()
@@ -113,7 +113,7 @@ def main() -> None:
 
     if not todo_stack:
         print(
-            f"{C.RED}Could not find 'To do' stack named '{args.todo_name}'.{C.RESET}",
+            f"{C.RED}Could not find 'Todo' stack named '{args.todo_name}'.{C.RESET}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -182,7 +182,7 @@ def main() -> None:
         sys.exit(1)
 
     print(
-        f"{C.CYAN}➡️  Moved card #{updated.id} '{updated.title}' "
+        f"{C.CYAN}➡  Moved card #{updated.id} '{updated.title}' "
         f"from '{current_stack.title}' to '{target_stack.title}'.{C.RESET}\n"
     )
 

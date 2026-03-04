@@ -190,7 +190,7 @@ def ansi_label(label: Dict[str, Any]) -> str:
 
 
 def colorize_output(grouped: List[Dict[str, Any]], show_owner: bool, datefmt: str) -> str:
-    E_STACK, E_CARD, E_LABEL, E_OWNER, E_ASSIGNEES, E_DUE, E_ARCH, E_TODO, E_DONE = "🗂️", "📝", "🏷️", "👤", "👥", "📅", "📦", "✔️ ", "✅"
+    E_STACK, E_CARD, E_LABEL, E_OWNER, E_ASSIGNEES, E_DUE, E_ARCH, E_TODO, E_DONE = "🗂", "📝", "🏷", "👤", "👥", "📅", "📦", "✔ ", "✅"
     lines: List[str] = []
     for block in grouped:
         st = block["stack"]
@@ -281,14 +281,14 @@ def pango_output(grouped: List[Dict[str, Any]], show_owner: bool, datefmt: str) 
         for c in cards:
             t = pango_escape(c["title"] or "(untitled)")
             if st.get("title").lower() == "todo" or st.get("title").lower() == "to do":
-                line = f"✔️  {t}"
+                line = f"✔  {t}"
             elif st.get("title").lower() == "done":
                 line = f"✅ <span foreground='#888888'>{t}</span>"
             else:
                 line = f"📝 {t}"
             meta = []
             if c.get("labels"):
-                meta.append("🏷️ " + ", ".join(pango_label(lb) for lb in c["labels"]))
+                meta.append("🏷 " + ", ".join(pango_label(lb) for lb in c["labels"]))
             if show_owner and c.get("owner"):
                 meta.append(f"<span foreground='#58a6ff'>👤 {pango_escape(c['owner'])}</span>")
             if c.get("assignees"):

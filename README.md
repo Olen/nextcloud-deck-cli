@@ -35,7 +35,7 @@ Helper for TODO-lists
 
 Requires a board with 3 stacks:
 
-* Todo (or To do)
+* Todo
 * Doing
 * Done
 
@@ -56,13 +56,13 @@ options:
   -b, --board-id BOARD_ID
                         Board ID
   --todo-name TODO_NAME
-                        Name of "To do" stack
+                        Name of "Todo" stack
   --doing-name DOING_NAME
                         Name of "Doing" stack
   --done-name DONE_NAME
                         Name of "Done" stack
-  --add TITLE           Add new card to "To do" stack
+  --add TITLE           Add new card to "Todo" stack
   --doing TITLE         Move card to "Doing" stack
   --done TITLE          Move card to "Done" stack
-  --do TITLE            Move card back to "To do" stack
+  --do TITLE            Move card back to "Todo" stack
 ```

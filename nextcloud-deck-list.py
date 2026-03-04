@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from dateutil import parser as dateparser  # built-in on most distros
 from typing import List, Optional
 
-from nextcloud_deck_core import DeckClient, Stack, Card, Label, API_BASE_SUFFIX
+from olen_deck import DeckClient, Stack, Card, Label
 """
 List Nextcloud Deck cards from a board, grouped by lists (stacks).
 
@@ -100,7 +100,7 @@ def ansi_label(label: Label) -> str:
 
 # ---------- Output formatters ----------
 E_STACK, E_CARD, E_LABEL, E_OWNER, E_ASSIGNEES, E_DUE, E_ARCH, E_TODO, E_DONE = (
-    "🗂️", "📝", "🏷️", "👤", "👥", "📅", "📦", "✔️ ", "✅"
+    "🗂", "📝", "🏷", "👤", "👥", "📅", "📦", "✔ ", "✅"
 )
 
 def card_icon(stack: Stack) -> str:
@@ -201,7 +201,7 @@ def pango_output(stacks: List[Stack], show_owner: bool, datefmt: str) -> str:
     lines: list[str] = []
     for s in stacks:
         title = pango_escape(s.title or f"List {s.id}")
-        lines.append(f"<b><span foreground='#1f6feb'>🗂️ {title}</span></b>")
+        lines.append(f"<b><span foreground='#1f6feb'>🗂 {title}</span></b>")
         if not s.cards:
             lines.append("<span foreground='#6e7781'>(no cards)</span>")
             continue
@@ -210,7 +210,7 @@ def pango_output(stacks: List[Stack], show_owner: bool, datefmt: str) -> str:
             line = f"• <b>{card_icon(s)} {t}</b>"
             meta: list[str] = []
             if c.labels:
-                meta.append("🏷️ " + ", ".join(pango_label(lb) for lb in c.labels))
+                meta.append("🏷 " + ", ".join(pango_label(lb) for lb in c.labels))
             if show_owner and c.owner:
                 meta.append(
                     f"<span foreground='#58a6ff'>👤 {pango_escape(c.owner)}</span>"
@@ -350,7 +350,7 @@ def main() -> None:
             json.dumps(
                 {
                     "board_id": args.board_id,
-                    "api_base": args.url.rstrip("/") + API_BASE_SUFFIX,
+                    "api_base": client.api_base,
                     "stacks": grouped,
                 },
                 indent=2,
