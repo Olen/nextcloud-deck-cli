@@ -8,6 +8,7 @@ Spec: docs/superpowers/specs/2026-05-11-imap-deck-sync-design.md
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -110,6 +111,8 @@ class AssignLabelAction:
 
 Action = UnstarAction | MoveToDoneAction | CreateCardAction | AssignLabelAction
 
+log = logging.getLogger(__name__)
+
 
 def make_plan(
     starred: dict[str, StarredMessage],
@@ -175,3 +178,41 @@ def make_plan(
             )
 
     return actions
+
+
+def fetch_managed(stacks) -> dict[str, ManagedCard]:
+    """
+    Walk every stack on the board, parse each card's description, and return
+    a {message_id: ManagedCard} mapping for cards that carry our marker.
+
+    Cards without the marker are silently skipped. Cards whose Message-ID has
+    already been seen log a WARN and are skipped (the first sighting wins).
+
+    Also captures each card's current Deck label IDs so the planner can decide
+    whether to retro-tag with the Email label.
+    """
+    managed: dict[str, ManagedCard] = {}
+    for stack in stacks:
+        for card in (getattr(stack, "cards", None) or []):
+            msgid = parse_marker(getattr(card, "description", None))
+            if not msgid:
+                continue
+            if msgid in managed:
+                log.warning(
+                    "Duplicate imap-sync marker for Message-ID %s "
+                    "(card #%s in stack #%s vs. card #%s in stack #%s); keeping first",
+                    msgid, managed[msgid].card.id, managed[msgid].stack_id,
+                    card.id, stack.id,
+                )
+                continue
+            label_ids = frozenset(
+                lb.id for lb in (getattr(card, "labels", None) or [])
+                if getattr(lb, "id", None) is not None
+            )
+            managed[msgid] = ManagedCard(
+                message_id=msgid,
+                card=card,
+                stack_id=stack.id,
+                label_ids=label_ids,
+            )
+    return managed

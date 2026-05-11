@@ -10,6 +10,7 @@ from imap_deck_sync import (
     AssignLabelAction,
     StackIds,
     make_plan,
+    fetch_managed,
 )
 
 
@@ -249,3 +250,97 @@ class TestMakePlan:
         assigns = [a for a in plan if isinstance(a, AssignLabelAction)]
         assert len(assigns) == 1
         assert assigns[0].stack_id == 99
+
+
+class _FakeLabel:
+    """Minimal stand-in for olen_deck.Label."""
+    def __init__(self, id):
+        self.id = id
+
+
+class _FakeCard:
+    """Minimal stand-in for olen_deck.Card."""
+    def __init__(self, id, description="", stack_id=None, labels=None):
+        self.id = id
+        self.description = description
+        self.stack_id = stack_id
+        self.labels = labels or []
+
+
+class _FakeStack:
+    def __init__(self, id, cards):
+        self.id = id
+        self.cards = cards
+
+
+class TestFetchManaged:
+    def test_empty_board_returns_empty_dict(self):
+        assert fetch_managed(stacks=[]) == {}
+
+    def test_skips_cards_without_marker(self):
+        stacks = [_FakeStack(id=1, cards=[
+            _FakeCard(id=10, description="just a manual card", stack_id=1),
+            _FakeCard(id=11, description="", stack_id=1),
+        ])]
+        assert fetch_managed(stacks=stacks) == {}
+
+    def test_picks_up_managed_card(self):
+        stacks = [_FakeStack(id=1, cards=[
+            _FakeCard(id=10, description="<!-- imap-sync: message-id=<a@x> -->", stack_id=1),
+        ])]
+        managed = fetch_managed(stacks=stacks)
+        assert set(managed.keys()) == {"<a@x>"}
+        assert managed["<a@x>"].stack_id == 1
+        assert managed["<a@x>"].card.id == 10
+        assert managed["<a@x>"].message_id == "<a@x>"
+
+    def test_scans_all_stacks_not_just_three(self):
+        # Cards in any stack, including custom ones, must be discovered.
+        stacks = [
+            _FakeStack(id=1, cards=[_FakeCard(id=10, description="<!-- imap-sync: message-id=<a@x> -->", stack_id=1)]),
+            _FakeStack(id=2, cards=[_FakeCard(id=20, description="<!-- imap-sync: message-id=<b@x> -->", stack_id=2)]),
+            _FakeStack(id=99, cards=[_FakeCard(id=30, description="<!-- imap-sync: message-id=<c@x> -->", stack_id=99)]),
+        ]
+        managed = fetch_managed(stacks=stacks)
+        assert set(managed.keys()) == {"<a@x>", "<b@x>", "<c@x>"}
+        assert managed["<c@x>"].stack_id == 99
+
+    def test_duplicate_message_id_keeps_first_and_warns(self, caplog):
+        import logging
+        stacks = [
+            _FakeStack(id=1, cards=[_FakeCard(id=10, description="<!-- imap-sync: message-id=<dup@x> -->", stack_id=1)]),
+            _FakeStack(id=2, cards=[_FakeCard(id=20, description="<!-- imap-sync: message-id=<dup@x> -->", stack_id=2)]),
+        ]
+        with caplog.at_level(logging.WARNING):
+            managed = fetch_managed(stacks=stacks)
+        assert managed["<dup@x>"].card.id == 10
+        assert any("duplicate" in rec.message.lower() for rec in caplog.records)
+
+    def test_label_ids_default_to_empty_frozenset(self):
+        stacks = [_FakeStack(id=1, cards=[
+            _FakeCard(id=10, description="<!-- imap-sync: message-id=<a@x> -->", stack_id=1, labels=[]),
+        ])]
+        managed = fetch_managed(stacks=stacks)
+        assert managed["<a@x>"].label_ids == frozenset()
+
+    def test_label_ids_populated_from_card_labels(self):
+        stacks = [_FakeStack(id=1, cards=[
+            _FakeCard(
+                id=10,
+                description="<!-- imap-sync: message-id=<a@x> -->",
+                stack_id=1,
+                labels=[_FakeLabel(id=7), _FakeLabel(id=42)],
+            ),
+        ])]
+        managed = fetch_managed(stacks=stacks)
+        assert managed["<a@x>"].label_ids == frozenset({7, 42})
+
+    def test_handles_card_with_no_labels_attribute(self):
+        # Some serialised Cards may not have a labels attribute at all.
+        class _CardWithoutLabels:
+            id = 10
+            description = "<!-- imap-sync: message-id=<a@x> -->"
+            stack_id = 1
+        stacks = [_FakeStack(id=1, cards=[_CardWithoutLabels()])]
+        managed = fetch_managed(stacks=stacks)
+        assert managed["<a@x>"].label_ids == frozenset()
