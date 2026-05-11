@@ -576,3 +576,54 @@ class TestExecutePlan:
         assert summary.failures == 1
         assert deck.created  # card was still created
         assert deck.assigned == []  # label failed
+
+
+class _FakeDeckLabels:
+    """DeckClient stand-in supporting just get_board_labels / create_label."""
+    def __init__(self, existing_labels=None, create_returns=None):
+        self.existing_labels = existing_labels or []
+        self.create_returns = create_returns
+        self.create_calls = []
+
+    def get_board_labels(self, board_id=None):
+        return self.existing_labels
+
+    def create_label(self, board_id=None, title="", color="808080"):
+        self.create_calls.append({"board_id": board_id, "title": title, "color": color})
+        return self.create_returns
+
+
+class TestFindOrCreateEmailLabel:
+    def test_returns_existing_label_matched_by_title(self):
+        from imap_deck_sync import _find_or_create_email_label
+        existing = SimpleNamespace(id=7, title="Email", color="123456")
+        other = SimpleNamespace(id=8, title="Other", color="123456")
+        deck = _FakeDeckLabels(existing_labels=[other, existing])
+        result = _find_or_create_email_label(deck, board_id=4, name="Email", color="808080")
+        assert result is existing
+        assert deck.create_calls == []
+
+    def test_match_is_by_title_only_not_color(self):
+        # A same-color label with a different title must not match.
+        from imap_deck_sync import _find_or_create_email_label
+        existing_other = SimpleNamespace(id=8, title="Spam", color="808080")
+        created = SimpleNamespace(id=99, title="Email", color="808080")
+        deck = _FakeDeckLabels(existing_labels=[existing_other], create_returns=created)
+        result = _find_or_create_email_label(deck, board_id=4, name="Email", color="808080")
+        assert result is created
+        assert deck.create_calls == [{"board_id": 4, "title": "Email", "color": "808080"}]
+
+    def test_creates_label_when_absent(self):
+        from imap_deck_sync import _find_or_create_email_label
+        created = SimpleNamespace(id=42, title="Email", color="abcdef")
+        deck = _FakeDeckLabels(existing_labels=[], create_returns=created)
+        result = _find_or_create_email_label(deck, board_id=4, name="Email", color="abcdef")
+        assert result is created
+        assert deck.create_calls == [{"board_id": 4, "title": "Email", "color": "abcdef"}]
+
+    def test_raises_runtime_error_if_create_returns_none(self):
+        import pytest
+        from imap_deck_sync import _find_or_create_email_label
+        deck = _FakeDeckLabels(existing_labels=[], create_returns=None)
+        with pytest.raises(RuntimeError, match="Email"):
+            _find_or_create_email_label(deck, board_id=4, name="Email", color="808080")

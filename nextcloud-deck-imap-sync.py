@@ -113,12 +113,22 @@ def main() -> int:
     rc = run(cfg)
     if rc != 0:
         try:
-            remote_logger.discord.error(
-                title="imap-deck-sync failed",
-                message=f"Exit code {rc}. See logs at ~/bin/logs/imap-deck-sync.log",
-                app="imap-deck-sync",
-                icon="⭐",
-            )
+            if rc == 2:
+                # Per-card failures during an otherwise-completed run — warning, not error.
+                remote_logger.discord.warning(
+                    title="imap-deck-sync completed with per-card failures",
+                    message=f"Exit code {rc}. See logs at ~/bin/logs/imap-deck-sync.log",
+                    app="imap-deck-sync",
+                    icon="⭐",
+                )
+            else:
+                # rc=1: setup/connection failure — escalate.
+                remote_logger.discord.error(
+                    title="imap-deck-sync failed",
+                    message=f"Exit code {rc}. See logs at ~/bin/logs/imap-deck-sync.log",
+                    app="imap-deck-sync",
+                    icon="⭐",
+                )
         except Exception as e:
             print(f"Failed to send Discord alert: {e}", file=sys.stderr)
     return rc
