@@ -9,7 +9,7 @@ set -euo pipefail
 
 # 1Password item names — adjust to match what you have in your vault.
 NC_OP_ITEM="${NC_OP_ITEM:-nextcloud-olen-deck-app-password}"
-IMAP_OP_ITEM="${IMAP_OP_ITEM:-apollo-imap-olen}"
+IMAP_OP_ITEM="${IMAP_OP_ITEM:-olen lupus}"
 
 NEXTCLOUD_PASSWORD="$(op --item="$NC_OP_ITEM" --field=password)"
 IMAP_PASSWORD="$(op --item="$IMAP_OP_ITEM" --field=password)"
