@@ -29,3 +29,20 @@ def parse_marker(description: Optional[str]) -> Optional[str]:
         return None
     m = MARKER_RE.search(description)
     return m.group(1) if m else None
+
+
+TITLE_MAX_LEN = 200
+
+
+def format_card_title(name: Optional[str], addr: str, subject: Optional[str]) -> str:
+    """
+    Build the Deck card title from an email's From and Subject.
+
+    - Prefer the display name; fall back to the bare address.
+    - Collapse runs of whitespace (incl. newlines/tabs) in the subject.
+    - Truncate the final title to TITLE_MAX_LEN chars.
+    """
+    sender = (name or "").strip() or addr
+    subj = " ".join((subject or "").split())
+    title = f"{sender}: {subj}"
+    return title[:TITLE_MAX_LEN]

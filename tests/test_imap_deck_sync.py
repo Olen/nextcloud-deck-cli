@@ -44,3 +44,35 @@ class TestParseMarker:
             "<!-- imap-sync: message-id=<second@x> -->"
         )
         assert parse_marker(desc) == "<first@x>"
+
+
+from imap_deck_sync import format_card_title
+
+
+class TestFormatCardTitle:
+    def test_uses_name_when_present(self):
+        assert format_card_title("Alice", "alice@example.com", "Hi") == "Alice: Hi"
+
+    def test_falls_back_to_email_when_name_empty(self):
+        assert format_card_title("", "alice@example.com", "Hi") == "alice@example.com: Hi"
+
+    def test_falls_back_to_email_when_name_none(self):
+        assert format_card_title(None, "alice@example.com", "Hi") == "alice@example.com: Hi"
+
+    def test_collapses_internal_whitespace(self):
+        assert format_card_title("Alice", "a@x", "Hi   there\n\tworld") == "Alice: Hi there world"
+
+    def test_strips_leading_trailing_whitespace_in_subject(self):
+        assert format_card_title("Alice", "a@x", "   spaced   ") == "Alice: spaced"
+
+    def test_truncates_at_200_chars(self):
+        long_subject = "x" * 500
+        title = format_card_title("Alice", "a@x", long_subject)
+        assert len(title) == 200
+        assert title.startswith("Alice: ")
+
+    def test_handles_empty_subject(self):
+        assert format_card_title("Alice", "a@x", "") == "Alice: "
+
+    def test_handles_no_subject_None(self):
+        assert format_card_title("Alice", "a@x", None) == "Alice: "
