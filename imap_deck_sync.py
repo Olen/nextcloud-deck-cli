@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Optional
 
 
@@ -216,3 +217,47 @@ def fetch_managed(stacks) -> dict[str, ManagedCard]:
                 label_ids=label_ids,
             )
     return managed
+
+
+def _first_message_id(headers: dict) -> Optional[str]:
+    """Return the first Message-ID header, or None if missing/empty."""
+    values = headers.get("message-id") if headers else None
+    if not values:
+        return None
+    first = values[0] if isinstance(values, (list, tuple)) else values
+    return first or None
+
+
+def fetch_starred(messages_iter) -> dict[str, StarredMessage]:
+    """
+    Build {message_id: StarredMessage} from an iterable of imap_tools MailMessage
+    objects (or any duck-typed equivalent providing .uid, .from_values, .subject,
+    .headers).
+
+    The iterable is the result of `mailbox.fetch(...)`; this function does NOT
+    open or close the connection.
+    """
+    starred: dict[str, StarredMessage] = {}
+    for m in messages_iter:
+        msgid = _first_message_id(getattr(m, "headers", None) or {})
+        if not msgid:
+            log.warning(
+                "IMAP message uid=%s has no Message-ID header; skipping",
+                getattr(m, "uid", "?"),
+            )
+            continue
+        if msgid in starred:
+            log.warning(
+                "Duplicate Message-ID %s in IMAP folder (uid %s vs %s); keeping first",
+                msgid, starred[msgid].uid, getattr(m, "uid", "?"),
+            )
+            continue
+        fv = getattr(m, "from_values", None) or SimpleNamespace(name="", email="")
+        starred[msgid] = StarredMessage(
+            message_id=msgid,
+            uid=str(getattr(m, "uid", "")),
+            from_name=getattr(fv, "name", "") or None,
+            from_addr=getattr(fv, "email", "") or "",
+            subject=getattr(m, "subject", None),
+        )
+    return starred

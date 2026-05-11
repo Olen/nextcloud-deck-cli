@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from imap_deck_sync import (
     parse_marker,
     build_marker,
@@ -11,6 +13,7 @@ from imap_deck_sync import (
     StackIds,
     make_plan,
     fetch_managed,
+    fetch_starred,
 )
 
 
@@ -344,3 +347,59 @@ class TestFetchManaged:
         stacks = [_FakeStack(id=1, cards=[_CardWithoutLabels()])]
         managed = fetch_managed(stacks=stacks)
         assert managed["<a@x>"].label_ids == frozenset()
+
+
+def _imap_msg(uid, message_id, from_name="Alice", from_addr="a@x", subject="Hi"):
+    """Mimics an imap_tools MailMessage closely enough for fetch_starred."""
+    return SimpleNamespace(
+        uid=uid,
+        from_values=SimpleNamespace(name=from_name, email=from_addr),
+        subject=subject,
+        headers={"message-id": (message_id,)},
+    )
+
+
+class TestFetchStarred:
+    def test_empty_inbox_returns_empty_dict(self):
+        assert fetch_starred(messages_iter=iter([])) == {}
+
+    def test_returns_message_id_keyed_dict(self):
+        msgs = [_imap_msg(uid="1", message_id="<a@x>")]
+        result = fetch_starred(messages_iter=iter(msgs))
+        assert set(result.keys()) == {"<a@x>"}
+        sm = result["<a@x>"]
+        assert sm.uid == "1"
+        assert sm.from_name == "Alice"
+        assert sm.from_addr == "a@x"
+        assert sm.subject == "Hi"
+
+    def test_skips_messages_missing_message_id_header(self, caplog):
+        import logging
+        msgs = [
+            SimpleNamespace(
+                uid="2",
+                from_values=SimpleNamespace(name="", email="a@x"),
+                subject="no id",
+                headers={},   # no message-id
+            ),
+        ]
+        with caplog.at_level(logging.WARNING):
+            result = fetch_starred(messages_iter=iter(msgs))
+        assert result == {}
+        assert any("message-id" in rec.message.lower() for rec in caplog.records)
+
+    def test_first_message_wins_on_duplicate_message_id(self, caplog):
+        import logging
+        msgs = [
+            _imap_msg(uid="1", message_id="<dup@x>", subject="first"),
+            _imap_msg(uid="2", message_id="<dup@x>", subject="second"),
+        ]
+        with caplog.at_level(logging.WARNING):
+            result = fetch_starred(messages_iter=iter(msgs))
+        assert result["<dup@x>"].subject == "first"
+        assert any("duplicate" in rec.message.lower() for rec in caplog.records)
+
+    def test_message_id_is_taken_verbatim_with_angle_brackets(self):
+        msgs = [_imap_msg(uid="1", message_id="<CA+xyz@example.com>")]
+        result = fetch_starred(messages_iter=iter(msgs))
+        assert "<CA+xyz@example.com>" in result
