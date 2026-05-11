@@ -9,7 +9,8 @@ Spec: docs/superpowers/specs/2026-05-11-imap-deck-sync-design.md
 from __future__ import annotations
 
 import re
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Optional
 
 
 MARKER_RE = re.compile(r"<!--\s*imap-sync:\s*message-id=(\S.*?)\s*-->", re.DOTALL)
@@ -46,3 +47,131 @@ def format_card_title(name: Optional[str], addr: str, subject: Optional[str]) ->
     subj = " ".join((subject or "").split())
     title = f"{sender}: {subj}"
     return title[:TITLE_MAX_LEN]
+
+
+@dataclass(frozen=True)
+class StarredMessage:
+    """One starred message as seen in the IMAP virtual folder."""
+    message_id: str
+    uid: str
+    from_name: Optional[str]
+    from_addr: str
+    subject: Optional[str]
+
+
+@dataclass(frozen=True)
+class ManagedCard:
+    """A Deck card carrying our imap-sync marker."""
+    message_id: str
+    card: Any           # olen_deck.Card — kept opaque so the planner is library-agnostic
+    stack_id: int
+    label_ids: frozenset[int] = frozenset()
+
+
+@dataclass(frozen=True)
+class StackIds:
+    """Resolved IDs of the three named stacks for this run."""
+    todo: int
+    doing: int
+    done: int
+
+
+@dataclass(frozen=True)
+class UnstarAction:
+    """Clear the \\Flagged flag on an IMAP message."""
+    uid: str
+    message_id: str
+
+
+@dataclass(frozen=True)
+class MoveToDoneAction:
+    """Move a Deck card to the Done stack."""
+    card: Any           # olen_deck.Card
+    target_stack_id: int
+
+
+@dataclass(frozen=True)
+class CreateCardAction:
+    """Create a new Deck card in the Todo stack. Labels are applied after creation."""
+    stack_id: int
+    title: str
+    description: str
+    message_id: str
+    label_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class AssignLabelAction:
+    """Attach an existing Deck label to an existing card."""
+    stack_id: int
+    card_id: int
+    label_id: int
+
+
+Action = UnstarAction | MoveToDoneAction | CreateCardAction | AssignLabelAction
+
+
+def make_plan(
+    starred: dict[str, StarredMessage],
+    managed: dict[str, ManagedCard],
+    stack_ids: StackIds,
+    email_label_id: int,
+) -> list[Action]:
+    """
+    Pure reconciliation function. Inputs are the current state; output is a
+    list of mutations to apply.
+
+    Ordering invariant: UnstarActions must precede any CreateCardActions for
+    the same Message-ID. We achieve this by tracking message_ids that have
+    been handled in Pass A and skipping them in Pass C.
+
+    Pass D: retro-tags any managed card missing the Email label, regardless of
+    which stack the card lives in.
+
+    See spec section "Reconciliation algorithm" for the full rationale.
+    """
+    actions: list[Action] = []
+    handled: set[str] = set()
+
+    # Pass A: cards in Done where the message is still starred → unstar.
+    for msgid, mc in managed.items():
+        if mc.stack_id == stack_ids.done and msgid in starred:
+            actions.append(UnstarAction(uid=starred[msgid].uid, message_id=msgid))
+            handled.add(msgid)
+
+    # Pass B: cards in Todo/Doing where the message is no longer starred → move to Done.
+    for msgid, mc in managed.items():
+        if mc.stack_id in (stack_ids.todo, stack_ids.doing) and msgid not in starred:
+            actions.append(MoveToDoneAction(card=mc.card, target_stack_id=stack_ids.done))
+
+    # Pass C: messages newly starred (no matching managed card) → create in Todo.
+    # Cards in custom stacks (e.g. "Later") DO appear in `managed` so we skip them here.
+    for msgid, msg in starred.items():
+        if msgid in handled:
+            continue
+        if msgid in managed:
+            continue
+        actions.append(
+            CreateCardAction(
+                stack_id=stack_ids.todo,
+                title=format_card_title(msg.from_name, msg.from_addr, msg.subject),
+                description=f"{build_marker(msgid)}\n",
+                message_id=msgid,
+                label_ids=(email_label_id,),
+            )
+        )
+
+    # Pass D: retro-tag managed cards that don't yet carry the Email label.
+    # Operates on ALL managed cards regardless of stack — origin labels persist
+    # even when a card is in Done or a custom stack.
+    for msgid, mc in managed.items():
+        if email_label_id not in mc.label_ids:
+            actions.append(
+                AssignLabelAction(
+                    stack_id=mc.stack_id,
+                    card_id=mc.card.id,
+                    label_id=email_label_id,
+                )
+            )
+
+    return actions
