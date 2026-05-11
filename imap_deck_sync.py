@@ -181,6 +181,121 @@ def make_plan(
     return actions
 
 
+def _flagged_flag():
+    # Import inside the function so this module stays importable without imap_tools
+    # (e.g. in environments that only run the pure-logic tests).
+    from imap_tools import MailMessageFlags
+    return MailMessageFlags.FLAGGED
+
+
+@dataclass
+class ExecutionSummary:
+    """Counts of actions actually applied during execute_plan."""
+    created: int = 0
+    moved: int = 0
+    unstarred: int = 0
+    labels_assigned: int = 0
+    failures: int = 0
+
+
+def execute_plan(plan, mailbox, deck, dry_run: bool = False) -> ExecutionSummary:
+    """
+    Apply a plan from make_plan() against the IMAP mailbox and Deck client.
+
+    Per-action failures are logged and counted in `summary.failures`; the rest
+    of the plan still runs (idempotency means the next run will pick up the
+    pieces).
+
+    For CreateCardAction, the card is created first, then each requested label
+    is applied with a separate `assign_label` call. A failure during the label
+    step counts as a failure (one per failed label) without rolling back the
+    card creation.
+
+    `mailbox` must duck-type as imap_tools.MailBox (we call
+    `.flag(uids, {FLAGGED}, False)`).
+    `deck` must duck-type as olen_deck.DeckClient (we call `.create_card(...)`,
+    `.move_card(...)`, and `.assign_label(...)`).
+    """
+    summary = ExecutionSummary()
+
+    for action in plan:
+        try:
+            if isinstance(action, UnstarAction):
+                if dry_run:
+                    log.info("[dry-run] would clear \\Flagged on uid=%s (message_id=%s)",
+                             action.uid, action.message_id)
+                else:
+                    log.info("Clearing \\Flagged on uid=%s (message_id=%s)",
+                             action.uid, action.message_id)
+                    mailbox.flag(action.uid, {_flagged_flag()}, False)
+                summary.unstarred += 1
+
+            elif isinstance(action, MoveToDoneAction):
+                if dry_run:
+                    log.info("[dry-run] would move card #%s to stack #%s",
+                             action.card.id, action.target_stack_id)
+                else:
+                    log.info("Moving card #%s to stack #%s",
+                             action.card.id, action.target_stack_id)
+                    deck.move_card(action.card, action.target_stack_id)
+                summary.moved += 1
+
+            elif isinstance(action, CreateCardAction):
+                if dry_run:
+                    log.info("[dry-run] would create card in stack #%s: %r (labels=%s)",
+                             action.stack_id, action.title, action.label_ids)
+                    summary.created += 1
+                    # Count label assignments that WOULD happen for dry-run accounting.
+                    summary.labels_assigned += len(action.label_ids)
+                else:
+                    log.info("Creating card in stack #%s: %r", action.stack_id, action.title)
+                    new_card = deck.create_card(
+                        stack_id=action.stack_id,
+                        title=action.title,
+                        description=action.description,
+                    )
+                    summary.created += 1
+                    # Apply each label. Per-label failures are recorded but don't undo the create.
+                    for label_id in action.label_ids:
+                        try:
+                            deck.assign_label(
+                                stack_id=action.stack_id,
+                                card_id=new_card.id,
+                                label_id=label_id,
+                            )
+                            summary.labels_assigned += 1
+                        except Exception as e:
+                            log.warning(
+                                "Failed to assign label %s to new card #%s: %s",
+                                label_id, new_card.id, e,
+                            )
+                            summary.failures += 1
+
+            elif isinstance(action, AssignLabelAction):
+                if dry_run:
+                    log.info("[dry-run] would assign label %s to card #%s in stack #%s",
+                             action.label_id, action.card_id, action.stack_id)
+                else:
+                    log.info("Assigning label %s to card #%s in stack #%s",
+                             action.label_id, action.card_id, action.stack_id)
+                    deck.assign_label(
+                        stack_id=action.stack_id,
+                        card_id=action.card_id,
+                        label_id=action.label_id,
+                    )
+                summary.labels_assigned += 1
+
+            else:
+                log.warning("Unknown action type %r — skipping", type(action).__name__)
+                summary.failures += 1
+
+        except Exception as e:
+            log.warning("Action %r failed: %s", action, e)
+            summary.failures += 1
+
+    return summary
+
+
 def fetch_managed(stacks) -> dict[str, ManagedCard]:
     """
     Walk every stack on the board, parse each card's description, and return

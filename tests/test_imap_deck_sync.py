@@ -14,6 +14,8 @@ from imap_deck_sync import (
     make_plan,
     fetch_managed,
     fetch_starred,
+    execute_plan,
+    ExecutionSummary,
 )
 
 
@@ -403,3 +405,174 @@ class TestFetchStarred:
         msgs = [_imap_msg(uid="1", message_id="<CA+xyz@example.com>")]
         result = fetch_starred(messages_iter=iter(msgs))
         assert "<CA+xyz@example.com>" in result
+
+
+class _FakeMailbox:
+    """imap_tools MailBox stand-in supporting just flag(uids, flag_set, value)."""
+    def __init__(self, fail_on=()):
+        self.flag_calls = []
+        self.fail_on = set(fail_on)
+
+    def flag(self, uids, flag_set, value):
+        # imap_tools flag() takes (uids: str|iterable, flag_set, value)
+        uid_list = [uids] if isinstance(uids, str) else list(uids)
+        for uid in uid_list:
+            if uid in self.fail_on:
+                raise RuntimeError(f"simulated IMAP failure on uid {uid}")
+        self.flag_calls.append((uid_list, flag_set, value))
+
+
+class _FakeDeck:
+    def __init__(self, fail_creates=False, fail_moves_for_card_ids=(),
+                 fail_assigns_for_label_ids=()):
+        self.created = []
+        self.moved = []
+        self.assigned = []
+        self.fail_creates = fail_creates
+        self.fail_moves_for_card_ids = set(fail_moves_for_card_ids)
+        self.fail_assigns_for_label_ids = set(fail_assigns_for_label_ids)
+        self._next_card_id = 1000
+
+    def create_card(self, stack_id, title, description="", **kwargs):
+        if self.fail_creates:
+            raise RuntimeError("simulated create failure")
+        self._next_card_id += 1
+        new_id = self._next_card_id
+        card = SimpleNamespace(id=new_id, title=title, stack_id=stack_id, description=description)
+        self.created.append({"id": new_id, "stack_id": stack_id, "title": title, "description": description})
+        return card
+
+    def move_card(self, card, target_stack_id):
+        if card.id in self.fail_moves_for_card_ids:
+            raise RuntimeError(f"simulated move failure for card {card.id}")
+        self.moved.append({"card_id": card.id, "target": target_stack_id})
+        card.stack_id = target_stack_id
+        return card
+
+    def assign_label(self, stack_id, card_id, label_id, **kwargs):
+        if label_id in self.fail_assigns_for_label_ids:
+            raise RuntimeError(f"simulated label failure for label {label_id}")
+        self.assigned.append({"stack_id": stack_id, "card_id": card_id, "label_id": label_id})
+
+
+class TestExecutePlan:
+    def test_empty_plan_is_noop(self):
+        mailbox, deck = _FakeMailbox(), _FakeDeck()
+        summary = execute_plan(plan=[], mailbox=mailbox, deck=deck, dry_run=False)
+        assert summary == ExecutionSummary(
+            created=0, moved=0, unstarred=0, labels_assigned=0, failures=0
+        )
+        assert mailbox.flag_calls == []
+        assert deck.created == []
+        assert deck.moved == []
+        assert deck.assigned == []
+
+    def test_creates_card_and_applies_labels(self):
+        mailbox, deck = _FakeMailbox(), _FakeDeck()
+        plan = [CreateCardAction(
+            stack_id=1, title="t", description="d", message_id="<a@x>",
+            label_ids=(7,),
+        )]
+        summary = execute_plan(plan=plan, mailbox=mailbox, deck=deck, dry_run=False)
+        assert summary.created == 1
+        assert summary.labels_assigned == 1  # the post-create label application
+        assert len(deck.created) == 1
+        assert deck.created[0]["title"] == "t"
+        # Label assigned to the new card's id
+        new_card_id = deck.created[0]["id"]
+        assert deck.assigned == [{"stack_id": 1, "card_id": new_card_id, "label_id": 7}]
+
+    def test_create_with_empty_label_ids_skips_assign(self):
+        mailbox, deck = _FakeMailbox(), _FakeDeck()
+        plan = [CreateCardAction(
+            stack_id=1, title="t", description="d", message_id="<a@x>",
+            label_ids=(),
+        )]
+        summary = execute_plan(plan=plan, mailbox=mailbox, deck=deck, dry_run=False)
+        assert summary.created == 1
+        assert summary.labels_assigned == 0
+        assert deck.assigned == []
+
+    def test_moves_card(self):
+        mailbox, deck = _FakeMailbox(), _FakeDeck()
+        card = SimpleNamespace(id=42, title="t", stack_id=2)
+        plan = [MoveToDoneAction(card=card, target_stack_id=3)]
+        summary = execute_plan(plan=plan, mailbox=mailbox, deck=deck, dry_run=False)
+        assert summary.moved == 1
+        assert deck.moved == [{"card_id": 42, "target": 3}]
+
+    def test_unstars_message(self):
+        from imap_tools import MailMessageFlags  # confirms the dep is present
+        mailbox, deck = _FakeMailbox(), _FakeDeck()
+        plan = [UnstarAction(uid="55", message_id="<a@x>")]
+        summary = execute_plan(plan=plan, mailbox=mailbox, deck=deck, dry_run=False)
+        assert summary.unstarred == 1
+        assert len(mailbox.flag_calls) == 1
+        uids, flag_set, value = mailbox.flag_calls[0]
+        assert uids == ["55"]
+        assert MailMessageFlags.FLAGGED in flag_set
+        assert value is False
+
+    def test_assigns_label_to_existing_card(self):
+        mailbox, deck = _FakeMailbox(), _FakeDeck()
+        plan = [AssignLabelAction(stack_id=1, card_id=42, label_id=7)]
+        summary = execute_plan(plan=plan, mailbox=mailbox, deck=deck, dry_run=False)
+        assert summary.labels_assigned == 1
+        assert deck.assigned == [{"stack_id": 1, "card_id": 42, "label_id": 7}]
+
+    def test_dry_run_performs_no_mutations(self):
+        mailbox, deck = _FakeMailbox(), _FakeDeck()
+        card = SimpleNamespace(id=42, title="t", stack_id=2)
+        plan = [
+            CreateCardAction(stack_id=1, title="t", description="d", message_id="<a@x>", label_ids=(7,)),
+            MoveToDoneAction(card=card, target_stack_id=3),
+            UnstarAction(uid="55", message_id="<a@x>"),
+            AssignLabelAction(stack_id=2, card_id=43, label_id=7),
+        ]
+        summary = execute_plan(plan=plan, mailbox=mailbox, deck=deck, dry_run=True)
+        # Counts reflect what would happen (create + post-create-label + move + unstar + assign)
+        assert summary == ExecutionSummary(
+            created=1, moved=1, unstarred=1, labels_assigned=2, failures=0
+        )
+        # But no IO was performed
+        assert deck.created == [] and deck.moved == [] and deck.assigned == []
+        assert mailbox.flag_calls == []
+
+    def test_per_action_failures_increment_failure_counter_and_continue(self, caplog):
+        import logging
+        mailbox = _FakeMailbox(fail_on=["bad-uid"])
+        deck = _FakeDeck(fail_moves_for_card_ids={42}, fail_assigns_for_label_ids={99})
+        card_good = SimpleNamespace(id=43, title="t", stack_id=2)
+        card_bad = SimpleNamespace(id=42, title="t", stack_id=2)
+        plan = [
+            UnstarAction(uid="bad-uid", message_id="<a@x>"),
+            MoveToDoneAction(card=card_bad, target_stack_id=3),                     # fails
+            MoveToDoneAction(card=card_good, target_stack_id=3),                    # succeeds
+            CreateCardAction(stack_id=1, title="t", description="d", message_id="<b@x>", label_ids=()),  # succeeds (no labels)
+            AssignLabelAction(stack_id=1, card_id=43, label_id=99),                 # fails
+        ]
+        with caplog.at_level(logging.WARNING):
+            summary = execute_plan(plan=plan, mailbox=mailbox, deck=deck, dry_run=False)
+        assert summary.failures == 3
+        assert summary.created == 1
+        assert summary.moved == 1
+        assert summary.unstarred == 0
+        assert summary.labels_assigned == 0
+        # All five actions were attempted; failures didn't abort the run
+        assert deck.created and deck.moved
+
+    def test_create_label_assignment_failure_counts_as_failure_not_unaffecting_create(self):
+        # If the post-create label assign fails, the card was still created.
+        # The failure increments `failures` but `created` stays at 1.
+        mailbox = _FakeMailbox()
+        deck = _FakeDeck(fail_assigns_for_label_ids={7})
+        plan = [CreateCardAction(
+            stack_id=1, title="t", description="d", message_id="<a@x>",
+            label_ids=(7,),
+        )]
+        summary = execute_plan(plan=plan, mailbox=mailbox, deck=deck, dry_run=False)
+        assert summary.created == 1
+        assert summary.labels_assigned == 0
+        assert summary.failures == 1
+        assert deck.created  # card was still created
+        assert deck.assigned == []  # label failed
