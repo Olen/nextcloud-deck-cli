@@ -17,6 +17,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from imap_deck_sync import Config, run  # noqa: E402
+from olen.config import APP_CONFIG
+from olen.const import ATTR_APP, ATTR_LOG
+from olen.log import get_logger
+from olen.remote_log import RemoteLogger
 
 
 def env(name: str, default: str = "") -> str:
@@ -56,10 +60,23 @@ def main() -> int:
 
     args = p.parse_args()
 
+    APP_CONFIG.set(ATTR_APP, "name", "imap-deck-sync")
+    APP_CONFIG.set(ATTR_APP, "icon", "⭐")
+    APP_CONFIG.set(ATTR_LOG, "log_path", os.path.expanduser("~/bin/logs/"))
+
+    app_log = get_logger()
+    app_log.silent = True
+    app_log.set_level(app_log.DEBUG if args.verbose else app_log.INFO)
+    app_log.start_logger(APP_CONFIG)
+
+    # Bridge the stdlib `logging` calls from imap_deck_sync into a useful
+    # console format. The olen logger handles its own file output.
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+
+    remote_logger = RemoteLogger(APP_CONFIG)
 
     missing = [
         name for name, ok in (
@@ -93,7 +110,18 @@ def main() -> int:
         dry_run=args.dry_run,
         verbose=args.verbose,
     )
-    return run(cfg)
+    rc = run(cfg)
+    if rc != 0:
+        try:
+            remote_logger.discord.error(
+                title="imap-deck-sync failed",
+                message=f"Exit code {rc}. See logs at ~/bin/logs/imap-deck-sync.log",
+                app="imap-deck-sync",
+                icon="⭐",
+            )
+        except Exception as e:
+            print(f"Failed to send Discord alert: {e}", file=sys.stderr)
+    return rc
 
 
 if __name__ == "__main__":
