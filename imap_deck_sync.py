@@ -376,3 +376,134 @@ def fetch_starred(messages_iter) -> dict[str, StarredMessage]:
             subject=getattr(m, "subject", None),
         )
     return starred
+
+
+@dataclass
+class Config:
+    nc_url: str
+    nc_username: str
+    nc_password: str
+    nc_board_id: int
+    todo_stack_name: str
+    doing_stack_name: str
+    done_stack_name: str
+    email_label_name: str
+    email_label_color: str
+    imap_host: str
+    imap_port: int
+    imap_user: str
+    imap_password: str
+    imap_folder: str
+    dry_run: bool = False
+    verbose: bool = False
+
+
+def _find_stack(stacks, name: str):
+    target = (name or "").strip().lower()
+    for s in stacks:
+        if (getattr(s, "title", "") or "").strip().lower() == target:
+            return s
+    return None
+
+
+def _find_or_create_email_label(deck, board_id: int, name: str, color: str):
+    """
+    Look up a label by exact title on the given board. If not present, create
+    it. Returns the label (object exposing `.id`).
+    """
+    labels = deck.get_board_labels(board_id=board_id)
+    for lb in labels:
+        if (getattr(lb, "title", "") or "").strip() == name:
+            return lb
+    log.info("Creating Deck label %r (color #%s) on board %s", name, color, board_id)
+    created = deck.create_label(board_id=board_id, title=name, color=color)
+    if created is None:
+        raise RuntimeError(f"create_label returned None for label {name!r}")
+    return created
+
+
+def run(config: Config) -> int:
+    """
+    Orchestrate one full sync. Returns a process exit code:
+      0 — clean run
+      1 — setup/connection error (Deck or IMAP couldn't be queried)
+      2 — sync completed but at least one per-action failure occurred
+    """
+    from imap_tools import MailBox
+    from olen_deck import DeckClient
+
+    deck = DeckClient(
+        config.nc_url,
+        config.nc_username,
+        config.nc_password,
+        config.nc_board_id,
+    )
+
+    try:
+        stacks = deck.fetch_stacks(include_archived=False)
+    except Exception as e:
+        log.error("Failed to fetch Deck stacks: %s", e)
+        return 1
+
+    todo = _find_stack(stacks, config.todo_stack_name)
+    doing = _find_stack(stacks, config.doing_stack_name)
+    done = _find_stack(stacks, config.done_stack_name)
+
+    missing = [
+        n for n, s in (
+            (config.todo_stack_name, todo),
+            (config.doing_stack_name, doing),
+            (config.done_stack_name, done),
+        ) if s is None
+    ]
+    if missing:
+        log.error("Could not find required stack(s): %s on board %s",
+                  ", ".join(missing), config.nc_board_id)
+        return 1
+
+    try:
+        email_label = _find_or_create_email_label(
+            deck, config.nc_board_id,
+            name=config.email_label_name,
+            color=config.email_label_color,
+        )
+    except Exception as e:
+        log.error("Failed to look up or create %r label: %s",
+                  config.email_label_name, e)
+        return 1
+    log.info("Using Email label id=%s on board %s", email_label.id, config.nc_board_id)
+
+    stack_ids = StackIds(todo=todo.id, doing=doing.id, done=done.id)
+    managed = fetch_managed(stacks)
+    log.info("Found %d managed card(s) on board %s", len(managed), config.nc_board_id)
+
+    try:
+        with MailBox(config.imap_host, port=config.imap_port).login(
+            config.imap_user, config.imap_password, initial_folder=config.imap_folder
+        ) as mailbox:
+            starred = fetch_starred(mailbox.fetch(mark_seen=False, bulk=True))
+            log.info("Found %d starred message(s) in %s", len(starred), config.imap_folder)
+
+            plan = make_plan(
+                starred=starred,
+                managed=managed,
+                stack_ids=stack_ids,
+                email_label_id=email_label.id,
+            )
+            log.info("Plan: %d action(s)%s",
+                     len(plan), " (dry-run)" if config.dry_run else "")
+
+            summary = execute_plan(
+                plan=plan, mailbox=mailbox, deck=deck, dry_run=config.dry_run
+            )
+    except Exception as e:
+        log.error("IMAP/sync failed: %s", e)
+        return 1
+
+    log.info(
+        "Done: created=%d moved=%d unstarred=%d labels_assigned=%d failures=%d%s",
+        summary.created, summary.moved, summary.unstarred,
+        summary.labels_assigned, summary.failures,
+        " (dry-run)" if config.dry_run else "",
+    )
+    return 0 if summary.failures == 0 else 2
