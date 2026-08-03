@@ -24,6 +24,7 @@ from imap_deck_sync import (
     ExecutionSummary,
     Config,
     validate_archive_days,
+    run,
 )
 
 
@@ -896,3 +897,199 @@ class TestFetchDeckActivity:
     def test_empty_first_page(self):
         deck = SimpleNamespace(get_deck_activity=MagicMock(return_value=[]))
         assert fetch_deck_activity(deck) == []
+
+
+# --- run() wiring: fakes for the archive-pass integration ---
+#
+# run() imports its IO dependencies *inside the function body*
+# (`from imap_tools import MailBox`, `from olen_deck import DeckClient`), so
+# tests must patch the attribute on the source module — patching
+# `imap_deck_sync.MailBox` etc. would have no effect, since that name is
+# never bound at module scope.
+
+EMAIL_LABEL_ID = 145
+
+
+def _run_stack(stack_id, title, cards=()):
+    return SimpleNamespace(id=stack_id, title=title, cards=list(cards))
+
+
+class _FakeRunMailbox:
+    """Stands in for the `with MailBox(...).login(...) as mailbox:` object.
+
+    Combines fetch() (read starred messages) and flag() (unstar), and is its
+    own context manager so `MailBox(...).login(...)` can just return it.
+    """
+    def __init__(self, messages=()):
+        self.messages = list(messages)
+        self.flag_calls = []
+
+    def fetch(self, mark_seen=False, bulk=True):
+        return iter(self.messages)
+
+    def flag(self, uids, flag_set, value):
+        uid_list = [uids] if isinstance(uids, str) else list(uids)
+        self.flag_calls.append((uid_list, flag_set, value))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def _fake_mailbox_class(fake_mailbox):
+    """Returns a stand-in for the `imap_tools.MailBox` class/constructor."""
+    class _FakeMailBox:
+        def __init__(self, host, port=None):
+            pass
+
+        def login(self, user, password, initial_folder=None):
+            return fake_mailbox
+
+    return _FakeMailBox
+
+
+class _FakeRunDeck:
+    """DeckClient stand-in exercising every method run() can call."""
+    def __init__(self, stacks, activity=None, activity_exc=None,
+                 email_label=None):
+        self._stacks = stacks
+        self._activity = list(activity) if activity is not None else []
+        self._activity_exc = activity_exc
+        self._email_label = email_label or SimpleNamespace(
+            id=EMAIL_LABEL_ID, title="Email", color="808080"
+        )
+        self.get_deck_activity_calls = []
+        self.created = []
+        self.moved = []
+        self.assigned = []
+        self.archived = []
+        self._next_card_id = 5000
+
+    def fetch_stacks(self, include_archived=False):
+        return self._stacks
+
+    def get_board_labels(self, board_id=None):
+        return [self._email_label]
+
+    def create_label(self, board_id=None, title="", color="808080"):
+        raise AssertionError("create_label should not be needed; label already exists")
+
+    def get_deck_activity(self, limit=200, since=None):
+        self.get_deck_activity_calls.append({"limit": limit, "since": since})
+        if self._activity_exc is not None:
+            raise self._activity_exc
+        return self._activity
+
+    def create_card(self, stack_id, title, description="", **kwargs):
+        self._next_card_id += 1
+        card = SimpleNamespace(
+            id=self._next_card_id, title=title, stack_id=stack_id, description=description,
+        )
+        self.created.append({"stack_id": stack_id, "title": title})
+        return card
+
+    def move_card(self, card, target_stack_id):
+        self.moved.append({"card_id": card.id, "target": target_stack_id})
+        card.stack_id = target_stack_id
+        return card
+
+    def assign_label(self, stack_id, card_id, label_id, **kwargs):
+        self.assigned.append({"stack_id": stack_id, "card_id": card_id, "label_id": label_id})
+
+    def archive_card(self, stack_id, card_id, board_id=None):
+        self.archived.append({"stack_id": stack_id, "card_id": card_id})
+
+
+def _run_config(**overrides):
+    fields = dict(
+        nc_url="https://cloud.example.com", nc_username="u", nc_password="p",
+        nc_board_id=4,
+        todo_stack_name="Todo", doing_stack_name="Doing", done_stack_name="Done",
+        email_label_name="Email", email_label_color="808080",
+        imap_host="imap.example.com", imap_port=993, imap_user="u", imap_password="p",
+        imap_folder="_Virtual/Important",
+    )
+    fields.update(overrides)
+    return Config(**fields)
+
+
+class TestRunArchiveWiring:
+    def _patch_deps(self, monkeypatch, deck, mailbox):
+        monkeypatch.setattr("olen_deck.DeckClient", lambda *a, **kw: deck)
+        monkeypatch.setattr("imap_tools.MailBox", _fake_mailbox_class(mailbox))
+
+    def test_archive_pass_skipped_when_disabled(self, monkeypatch):
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"), _run_stack(9, "Done"),
+        ]
+        deck = _FakeRunDeck(stacks=stacks)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        config = _run_config(archive_done_after_days=0)
+        rc = run(config)
+
+        assert rc == 0
+        assert deck.get_deck_activity_calls == []
+        assert deck.archived == []
+
+    def test_activity_fetch_failure_is_counted_not_silent(self, monkeypatch, caplog):
+        import logging
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"), _run_stack(9, "Done"),
+        ]
+        deck = _FakeRunDeck(stacks=stacks, activity_exc=RuntimeError("activity API down"))
+        # An unstarred-in-managed-sense, newly-starred message with no matching
+        # managed card: make_plan's Pass C turns this into a CreateCardAction,
+        # proving the main sync still ran to completion.
+        mailbox = _FakeRunMailbox(messages=[_imap_msg(uid="1", message_id="<new@x>")])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        config = _run_config(archive_done_after_days=7)
+        with caplog.at_level(logging.ERROR):
+            rc = run(config)
+
+        assert rc == 2
+        assert deck.archived == []
+        assert deck.created  # main IMAP<->Deck sync still completed
+        assert any(
+            rec.levelno == logging.ERROR and "activity" in rec.message.lower()
+            for rec in caplog.records
+        )
+
+    def test_eligible_card_is_archived_through_run(self, monkeypatch):
+        eligible = done_card(319, label_ids=(EMAIL_LABEL_ID,), stack_id=9)
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"),
+            _run_stack(9, "Done", cards=[eligible]),
+        ]
+        activity = [activity_entry(319, "2020-01-01T00:00:00+00:00", board="4", stack="9")]
+        deck = _FakeRunDeck(stacks=stacks, activity=activity)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        config = _run_config(archive_done_after_days=7)
+        rc = run(config)
+
+        assert rc == 0
+        assert deck.archived == [{"stack_id": 9, "card_id": 319}]
+
+    def test_archive_actions_do_not_displace_make_plan_actions(self, monkeypatch):
+        eligible = done_card(319, label_ids=(EMAIL_LABEL_ID,), stack_id=9)
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"),
+            _run_stack(9, "Done", cards=[eligible]),
+        ]
+        activity = [activity_entry(319, "2020-01-01T00:00:00+00:00", board="4", stack="9")]
+        deck = _FakeRunDeck(stacks=stacks, activity=activity)
+        mailbox = _FakeRunMailbox(messages=[_imap_msg(uid="1", message_id="<new@x>")])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        config = _run_config(archive_done_after_days=7)
+        rc = run(config)
+
+        assert rc == 0
+        assert deck.created  # make_plan's CreateCardAction reached execute_plan
+        assert deck.archived == [{"stack_id": 9, "card_id": 319}]
