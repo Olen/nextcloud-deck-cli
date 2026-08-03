@@ -22,6 +22,7 @@ from imap_deck_sync import (
     execute_plan,
     ExecutionSummary,
     Config,
+    validate_archive_days,
 )
 
 
@@ -830,11 +831,32 @@ class TestExecuteArchiveAction:
         assert summary.failures == 1
 
 
-class TestArchiveThresholdLimit:
-    def test_limit_constant_is_below_activity_retention(self):
-        # Nextcloud activity_expire_days is 30; the limit must leave headroom.
-        assert ARCHIVE_MAX_DAYS_LIMIT < 30
+class TestValidateArchiveDays:
+    def test_rejects_at_the_limit(self):
+        err = validate_archive_days(ARCHIVE_MAX_DAYS_LIMIT)
+        assert err is not None
+        assert str(ARCHIVE_MAX_DAYS_LIMIT) in err
 
+    def test_rejects_above_the_limit(self):
+        assert validate_archive_days(30) is not None
+
+    def test_accepts_just_below_the_limit(self):
+        assert validate_archive_days(ARCHIVE_MAX_DAYS_LIMIT - 1) is None
+
+    def test_accepts_the_default(self):
+        assert validate_archive_days(7) is None
+
+    def test_accepts_zero_which_disables_the_pass(self):
+        assert validate_archive_days(0) is None
+
+    def test_accepts_negative_which_disables_the_pass(self):
+        assert validate_archive_days(-1) is None
+
+    def test_message_reports_the_offending_value(self):
+        assert "99" in validate_archive_days(99)
+
+
+class TestConfigArchiveDays:
     def test_config_defaults_to_seven_days(self):
         cfg = Config(
             nc_url="u", nc_username="u", nc_password="p", nc_board_id=4,

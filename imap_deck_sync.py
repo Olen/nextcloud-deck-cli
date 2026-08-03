@@ -24,6 +24,17 @@ ARCHIVE_MAX_DAYS_LIMIT = 25
 MARKER_RE = re.compile(r"<!--\s*imap-sync:\s*message-id=(\S.*?)\s*-->", re.DOTALL)
 
 
+def validate_archive_days(days: int) -> str | None:
+    """Return an error message if the threshold is unusable, else None."""
+    if days >= ARCHIVE_MAX_DAYS_LIMIT:
+        return (
+            f"--archive-done-after-days must be below {ARCHIVE_MAX_DAYS_LIMIT} "
+            f"(got {days}). Nextcloud keeps only 30 days of activity, so a "
+            f"larger window would silently archive nothing."
+        )
+    return None
+
+
 def build_marker(message_id: str) -> str:
     """Return the HTML-comment marker for a Message-ID."""
     return f"<!-- imap-sync: message-id={message_id} -->"

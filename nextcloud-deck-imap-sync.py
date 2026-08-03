@@ -16,7 +16,7 @@ from pathlib import Path
 # Make the sibling module importable when running this script directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from imap_deck_sync import ARCHIVE_MAX_DAYS_LIMIT, Config, run  # noqa: E402
+from imap_deck_sync import ARCHIVE_MAX_DAYS_LIMIT, Config, run, validate_archive_days  # noqa: E402
 from olen.config import APP_CONFIG
 from olen.const import ATTR_APP, ATTR_LOG
 from olen.log import get_logger
@@ -96,13 +96,9 @@ def main() -> int:
         print(f"Missing required argument(s): {', '.join(missing)}", file=sys.stderr)
         return 2
 
-    if args.archive_done_after_days >= ARCHIVE_MAX_DAYS_LIMIT:
-        print(
-            f"--archive-done-after-days must be below {ARCHIVE_MAX_DAYS_LIMIT} "
-            f"(got {args.archive_done_after_days}). Nextcloud keeps only 30 days "
-            f"of activity, so a larger window would silently archive nothing.",
-            file=sys.stderr,
-        )
+    err = validate_archive_days(args.archive_done_after_days)
+    if err:
+        print(err, file=sys.stderr)
         return 2
 
     cfg = Config(
