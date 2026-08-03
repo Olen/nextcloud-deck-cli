@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from imap_deck_sync import (
     parse_marker,
@@ -784,3 +785,44 @@ class TestPlanArchive:
 
     def test_empty_inputs(self):
         assert plan_archive([], {}, email_label_id=145, now=NOW, max_age_days=7) == []
+
+
+class TestExecuteArchiveAction:
+    def _deck(self):
+        return SimpleNamespace(archive_card=MagicMock(return_value=None))
+
+    def test_calls_archive_card_with_stack_and_id(self):
+        deck = self._deck()
+        plan = [ArchiveAction(stack_id=9, card_id=319,
+                              card_title="X", done_at=NOW - 10 * DAY)]
+
+        summary = execute_plan(plan=plan, mailbox=None, deck=deck, dry_run=False)
+
+        deck.archive_card.assert_called_once_with(stack_id=9, card_id=319)
+        assert summary.archived == 1
+        assert summary.failures == 0
+
+    def test_dry_run_makes_no_api_call(self):
+        deck = self._deck()
+        plan = [ArchiveAction(stack_id=9, card_id=319,
+                              card_title="X", done_at=NOW - 10 * DAY)]
+
+        summary = execute_plan(plan=plan, mailbox=None, deck=deck, dry_run=True)
+
+        deck.archive_card.assert_not_called()
+        assert summary.archived == 1
+
+    def test_failure_is_counted_and_others_still_run(self):
+        deck = SimpleNamespace(
+            archive_card=MagicMock(side_effect=[RuntimeError("boom"), None])
+        )
+        plan = [
+            ArchiveAction(stack_id=9, card_id=1, card_title="A", done_at=1),
+            ArchiveAction(stack_id=9, card_id=2, card_title="B", done_at=1),
+        ]
+
+        summary = execute_plan(plan=plan, mailbox=None, deck=deck, dry_run=False)
+
+        assert deck.archive_card.call_count == 2
+        assert summary.archived == 1
+        assert summary.failures == 1

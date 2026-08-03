@@ -312,6 +312,7 @@ class ExecutionSummary:
     moved: int = 0
     unstarred: int = 0
     labels_assigned: int = 0
+    archived: int = 0
     failures: int = 0
 
 
@@ -331,7 +332,7 @@ def execute_plan(plan, mailbox, deck, dry_run: bool = False) -> ExecutionSummary
     `mailbox` must duck-type as imap_tools.MailBox (we call
     `.flag(uids, {FLAGGED}, False)`).
     `deck` must duck-type as olen_deck.DeckClient (we call `.create_card(...)`,
-    `.move_card(...)`, and `.assign_label(...)`).
+    `.move_card(...)`, `.assign_label(...)`, and `.archive_card(...)`).
     """
     summary = ExecutionSummary()
 
@@ -401,6 +402,16 @@ def execute_plan(plan, mailbox, deck, dry_run: bool = False) -> ExecutionSummary
                         label_id=action.label_id,
                     )
                 summary.labels_assigned += 1
+
+            elif isinstance(action, ArchiveAction):
+                if dry_run:
+                    log.info("[dry-run] would archive card #%s %r (in Done since %s)",
+                             action.card_id, action.card_title, action.done_at)
+                else:
+                    log.info("Archiving card #%s %r (in Done since %s)",
+                             action.card_id, action.card_title, action.done_at)
+                    deck.archive_card(stack_id=action.stack_id, card_id=action.card_id)
+                summary.archived += 1
 
             else:
                 log.warning("Unknown action type %r — skipping", type(action).__name__)
