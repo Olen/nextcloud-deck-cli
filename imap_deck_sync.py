@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -110,7 +111,19 @@ class AssignLabelAction:
     label_id: int
 
 
-Action = UnstarAction | MoveToDoneAction | CreateCardAction | AssignLabelAction
+@dataclass(frozen=True)
+class ArchiveAction:
+    """Archive a Deck card that has aged out of the Done stack."""
+    stack_id: int
+    card_id: int
+    card_title: str
+    done_at: int
+
+
+Action = (
+    UnstarAction | MoveToDoneAction | CreateCardAction
+    | AssignLabelAction | ArchiveAction
+)
 
 log = logging.getLogger(__name__)
 
@@ -179,6 +192,63 @@ def make_plan(
             )
 
     return actions
+
+
+def _parse_activity_datetime(value) -> Optional[int]:
+    """ISO-8601 (usually offset-aware UTC) -> epoch seconds, or None."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def latest_done_at(entries, board_id: int, done_stack_id: int) -> dict[int, int]:
+    """
+    Map card id -> epoch seconds of the card's most recent move into the Done
+    stack, from Nextcloud activity entries.
+
+    `entries` must be newest-first (as the API returns them), so the first
+    match for a card wins. That is what makes a card moved Todo->Done->Todo->Done
+    resolve to its latest arrival.
+
+    A move is identified by the presence of `stackBefore` in the rich-subject
+    parameters. Never string-match `subject`: "moved" also matches "removed",
+    and the text is localised.
+    """
+    out: dict[int, int] = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("object_type") != "deck_card":
+            continue
+
+        rich = entry.get("subject_rich") or []
+        params = rich[1] if len(rich) > 1 and isinstance(rich[1], dict) else {}
+        if "stackBefore" not in params:
+            continue
+
+        board = params.get("board") or {}
+        stack = params.get("stack") or {}
+        if str(board.get("id")) != str(board_id):
+            continue
+        if str(stack.get("id")) != str(done_stack_id):
+            continue
+
+        card_id = entry.get("object_id")
+        if card_id is None or card_id in out:
+            continue
+
+        ts = _parse_activity_datetime(entry.get("datetime"))
+        if ts is None:
+            continue
+        out[card_id] = ts
+
+    return out
 
 
 def _flagged_flag():

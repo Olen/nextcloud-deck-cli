@@ -10,8 +10,10 @@ from imap_deck_sync import (
     MoveToDoneAction,
     CreateCardAction,
     AssignLabelAction,
+    ArchiveAction,
     StackIds,
     make_plan,
+    latest_done_at,
     fetch_managed,
     fetch_starred,
     execute_plan,
@@ -627,3 +629,78 @@ class TestFindOrCreateEmailLabel:
         deck = _FakeDeckLabels(existing_labels=[], create_returns=None)
         with pytest.raises(RuntimeError, match="Email"):
             _find_or_create_email_label(deck, board_id=4, name="Email", color="808080")
+
+
+def activity_entry(card_id, when, board="4", stack="9",
+                   stack_before="22", object_type="deck_card", subject="You have moved the card X"):
+    """Build an activity entry shaped like the real Nextcloud response."""
+    params = {"board": {"id": board}, "stack": {"id": stack}}
+    if stack_before is not None:
+        params["stackBefore"] = {"id": stack_before}
+    return {
+        "object_type": object_type,
+        "object_id": card_id,
+        "datetime": when,
+        "subject": subject,
+        "subject_rich": ["template", params],
+    }
+
+
+class TestLatestDoneAt:
+    def test_extracts_move_to_done(self):
+        entries = [activity_entry(319, "2026-07-29T12:31:01+00:00")]
+        assert latest_done_at(entries, board_id=4, done_stack_id=9) == {319: 1785328261}
+
+    def test_newest_first_wins_for_repeated_moves(self):
+        entries = [
+            activity_entry(7, "2026-07-29T12:31:01+00:00"),
+            activity_entry(7, "2026-06-01T00:00:00+00:00"),
+        ]
+        assert latest_done_at(entries, 4, 9) == {7: 1785328261}
+
+    def test_ignores_other_boards(self):
+        entries = [activity_entry(7, "2026-07-29T12:31:01+00:00", board="8")]
+        assert latest_done_at(entries, 4, 9) == {}
+
+    def test_ignores_other_stacks(self):
+        entries = [activity_entry(7, "2026-07-29T12:31:01+00:00", stack="22")]
+        assert latest_done_at(entries, 4, 9) == {}
+
+    def test_ignores_entries_without_stack_before(self):
+        # "You have removed the tag X from card Y in list Done" - has stack, no stackBefore
+        entries = [activity_entry(7, "2026-07-29T12:31:01+00:00", stack_before=None,
+                                  subject="You have removed the tag Email from card Y")]
+        assert latest_done_at(entries, 4, 9) == {}
+
+    def test_does_not_string_match_subject(self):
+        # Guards the "removed" substring trap: no stackBefore means not a move,
+        # even though the subject contains the letters "moved".
+        entries = [activity_entry(7, "2026-07-29T12:31:01+00:00", stack_before=None,
+                                  subject="You have removed the tag 10 from card Coca Cola")]
+        assert latest_done_at(entries, 4, 9) == {}
+
+    def test_ignores_non_card_object_types(self):
+        entries = [activity_entry(7, "2026-07-29T12:31:01+00:00", object_type="deck_board")]
+        assert latest_done_at(entries, 4, 9) == {}
+
+    def test_empty_input(self):
+        assert latest_done_at([], 4, 9) == {}
+
+    def test_malformed_entries_are_skipped_not_fatal(self):
+        entries = [
+            {"object_type": "deck_card", "object_id": 1},                      # no subject_rich
+            {"object_type": "deck_card", "object_id": 2, "subject_rich": []},   # empty
+            {"object_type": "deck_card", "object_id": 3, "subject_rich": ["t"]},  # no params
+            {"object_type": "deck_card", "object_id": 4, "subject_rich": ["t", None]},
+            activity_entry(9, "not-a-date"),
+            activity_entry(10, "2026-07-29T12:31:01+00:00"),
+        ]
+        assert latest_done_at(entries, 4, 9) == {10: 1785328261}
+
+    def test_naive_datetime_is_treated_as_utc(self):
+        entries = [activity_entry(11, "2026-07-29T12:31:01")]
+        assert latest_done_at(entries, 4, 9) == {11: 1785328261}
+
+    def test_ids_may_be_strings_or_ints(self):
+        entries = [activity_entry(12, "2026-07-29T12:31:01+00:00", board=4, stack=9)]
+        assert latest_done_at(entries, 4, 9) == {12: 1785328261}
