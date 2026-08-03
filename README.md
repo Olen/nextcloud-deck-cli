@@ -86,11 +86,15 @@ messages works.
 Cards carrying the label that have sat in `Done` longer than
 `--archive-done-after-days` (default 7) are archived. Time-in-Done is read
 from the Nextcloud Activity log rather than the card's `lastModified`, since
-Deck rewrites `lastModified` on every card in a stack whenever any card moves
-into that stack. Nextcloud keeps 30 days of activity, so the threshold has to
-stay well below that: values of 25 or more are rejected at startup, and 0 or
-less disables the archiving pass. Cards with no move-to-Done record in the
-activity window are left alone.
+this client's `move_card()` (a `reorder`-endpoint workaround for
+[Deck#6830](https://github.com/nextcloud/deck/issues/6830)) rewrites
+`lastModified` on every card in the target stack when it moves a card into
+it. Activity retention is admin-configurable via Nextcloud's
+`activity_expire_days` setting and was 30 days on the instance this was built
+against — size the threshold against your own instance's setting. Values of
+25 or more are rejected at startup, and 0 or less disables the archiving
+pass. Cards with no move-to-Done record in the activity window are left
+alone.
 
 Use `--dry-run` to see the full plan without making any IMAP or Deck changes
 — the safe way to try it out.
