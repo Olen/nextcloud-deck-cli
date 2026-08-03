@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from imap_deck_sync import (
+    ARCHIVE_MAX_DAYS_LIMIT,
     parse_marker,
     build_marker,
     format_card_title,
@@ -20,6 +21,7 @@ from imap_deck_sync import (
     fetch_starred,
     execute_plan,
     ExecutionSummary,
+    Config,
 )
 
 
@@ -826,3 +828,19 @@ class TestExecuteArchiveAction:
         assert deck.archive_card.call_count == 2
         assert summary.archived == 1
         assert summary.failures == 1
+
+
+class TestArchiveThresholdLimit:
+    def test_limit_constant_is_below_activity_retention(self):
+        # Nextcloud activity_expire_days is 30; the limit must leave headroom.
+        assert ARCHIVE_MAX_DAYS_LIMIT < 30
+
+    def test_config_defaults_to_seven_days(self):
+        cfg = Config(
+            nc_url="u", nc_username="u", nc_password="p", nc_board_id=4,
+            todo_stack_name="Todo", doing_stack_name="Doing", done_stack_name="Done",
+            email_label_name="Email", email_label_color="808080",
+            imap_host="h", imap_port=993, imap_user="u", imap_password="p",
+            imap_folder="_Virtual/Important",
+        )
+        assert cfg.archive_done_after_days == 7

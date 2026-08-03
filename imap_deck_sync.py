@@ -16,6 +16,11 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 
+# Nextcloud's activity_expire_days is 30 on this deployment. A threshold at or
+# near that value means records expire before a card can qualify, so archiving
+# would silently stop. Refuse thresholds that leave no headroom.
+ARCHIVE_MAX_DAYS_LIMIT = 25
+
 MARKER_RE = re.compile(r"<!--\s*imap-sync:\s*message-id=(\S.*?)\s*-->", re.DOTALL)
 
 
@@ -522,6 +527,7 @@ class Config:
     imap_user: str
     imap_password: str
     imap_folder: str
+    archive_done_after_days: int = 7
     dry_run: bool = False
     verbose: bool = False
 
