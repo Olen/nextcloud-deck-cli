@@ -15,7 +15,7 @@ from ncdeck import DeckClient, Stack, Card, Label
 """
 List Nextcloud Deck cards from a board, grouped by lists (stacks).
 
-Uses DeckClient from nextcloud_deck_core.py
+Uses DeckClient from ncdeck
 
 Output modes:
   --json       : grouped JSON dicts
