@@ -72,8 +72,9 @@ Verified properties:
 - **The feed spans all boards.** Recipe-board cards appear in the same response,
   so `board.id` must be filtered explicitly.
 - **Retention is 30 days** (`occ config:system:get activity_expire_days` = 30),
-  confirmed by the oldest available entry being 29 days old. Of 17 Email-labelled
-  cards currently in `Done`, only 8 have a usable record.
+  confirmed by the oldest available entry tracking a rolling ~30-day window.
+  How many cards actually carry a usable record is volatile — see
+  "Existing backlog" — so no fixed count is asserted here.
 
 ### Handling repeated moves
 
@@ -93,7 +94,8 @@ or it has no record at all (must be ignored). Distinguishing the two requires
 seeing the whole retention window.
 
 Because retention is a hard 30 days, "fetch everything available" is finite and
-well defined. On the current board that is 32 entries in a single request.
+well defined. On the current board that is on the order of 30 entries, well
+within a single request.
 Pagination via `since=<activity_id>` is bounded at 20 pages x 200 entries purely
 as a runaway guard.
 
@@ -172,7 +174,20 @@ def plan_archive(done_cards, done_at, email_label_id, now, max_age_days) -> list
 ```
 
 `latest_done_at` iterates newest-first and keeps the first entry per card where
-`board.id == board_id`, `stack.id == done_stack_id`, and the event is a move.
+`object_type == "deck_card"`, `board.id == board_id`, `stack.id == done_stack_id`,
+and the entry **contains a `stackBefore` key**.
+
+Move events MUST be identified by the presence of `stackBefore` in
+`subject_rich[1]` — never by string-matching `subject`. Two reasons, both
+verified against the live feed:
+
+- `"moved" in subject` also matches **"re*moved* the tag"**, producing five false
+  positives in a 31-entry sample.
+- `subject` is localised, so string matching breaks if the Nextcloud UI language
+  changes. `stackBefore` is structural.
+
+Correlation on the live feed: `stackBefore` present has zero false positives and
+zero false negatives against genuine move events.
 
 `plan_archive` eligibility, in order:
 
@@ -240,10 +255,25 @@ The repository has no CI configuration, so a locally passing `pytest` is the gat
 2. `nextcloud-deck-cli`: implement and test; pin the new version in
    `requirements.txt`.
 3. Dry run: `./imap-deck-sync-wrapper.sh --dry-run -v` and confirm the reported
-   set (approximately 8 cards at time of writing).
+   set. **Expect zero cards on the first run** (see "Existing backlog" below).
 4. No wrapper or systemd change is required — the default is 7 and the wrapper
    already forwards `"$@"`.
 5. Observe one timer cycle.
+
+## Existing backlog
+
+Measured 2026-08-03: the `Done` stack holds 28 cards, 17 of them Email-labelled.
+The activity window covers 2026-07-05 to 2026-08-02, and **only one** of those 17
+(card #319, moved 2026-07-29, 4 days old) has a usable record. The other 16 have
+none and will never be auto-archived.
+
+This changed materially in five days. On 2026-07-29 eight cards had records; most
+of those move events were dated 2026-06-30 and have since aged out of the 30-day
+window. The feature therefore does nothing to the current backlog — it only
+governs cards arriving in `Done` from now on, which reach the 7-day threshold
+long before their records expire at 30 days.
+
+The 16 record-less cards are archived manually, per decision.
 
 ## Out of scope
 
