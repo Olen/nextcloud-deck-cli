@@ -14,6 +14,7 @@ from imap_deck_sync import (
     StackIds,
     make_plan,
     latest_done_at,
+    plan_archive,
     fetch_managed,
     fetch_starred,
     execute_plan,
@@ -704,3 +705,82 @@ class TestLatestDoneAt:
     def test_ids_may_be_strings_or_ints(self):
         entries = [activity_entry(12, "2026-07-29T12:31:01+00:00", board=4, stack=9)]
         assert latest_done_at(entries, 4, 9) == {12: 1785328261}
+
+
+DAY = 86400
+NOW = 1785328261
+
+
+def done_card(card_id, label_ids=(145,), title="A card", stack_id=9):
+    return SimpleNamespace(
+        id=card_id,
+        title=title,
+        stack_id=stack_id,
+        labels=[SimpleNamespace(id=lid) for lid in label_ids],
+    )
+
+
+class TestPlanArchive:
+    def test_archives_card_past_threshold(self):
+        cards = [done_card(1)]
+        done_at = {1: NOW - 8 * DAY}
+        actions = plan_archive(cards, done_at, email_label_id=145,
+                               now=NOW, max_age_days=7)
+        assert actions == [ArchiveAction(stack_id=9, card_id=1,
+                                         card_title="A card",
+                                         done_at=NOW - 8 * DAY)]
+
+    def test_exact_boundary_archives(self):
+        actions = plan_archive([done_card(1)], {1: NOW - 7 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert len(actions) == 1
+
+    def test_one_second_under_threshold_waits(self):
+        actions = plan_archive([done_card(1)], {1: NOW - 7 * DAY + 1},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert actions == []
+
+    def test_card_without_email_label_is_skipped(self):
+        actions = plan_archive([done_card(1, label_ids=(999,))], {1: NOW - 30 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert actions == []
+
+    def test_card_with_no_labels_is_skipped(self):
+        actions = plan_archive([done_card(1, label_ids=())], {1: NOW - 30 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert actions == []
+
+    def test_card_without_done_at_record_is_skipped(self):
+        actions = plan_archive([done_card(1)], {},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert actions == []
+
+    def test_zero_days_disables_pass(self):
+        actions = plan_archive([done_card(1)], {1: NOW - 99 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=0)
+        assert actions == []
+
+    def test_negative_days_disables_pass(self):
+        actions = plan_archive([done_card(1)], {1: NOW - 99 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=-1)
+        assert actions == []
+
+    def test_mixed_set_yields_only_eligible(self):
+        cards = [
+            done_card(1),                                  # eligible
+            done_card(2, label_ids=(999,)),                # wrong label
+            done_card(3),                                  # too recent
+            done_card(4),                                  # no record
+        ]
+        done_at = {1: NOW - 10 * DAY, 2: NOW - 10 * DAY, 3: NOW - 1 * DAY}
+        actions = plan_archive(cards, done_at, email_label_id=145,
+                               now=NOW, max_age_days=7)
+        assert [a.card_id for a in actions] == [1]
+
+    def test_uses_each_cards_own_stack_id(self):
+        actions = plan_archive([done_card(1, stack_id=42)], {1: NOW - 10 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert actions[0].stack_id == 42
+
+    def test_empty_inputs(self):
+        assert plan_archive([], {}, email_label_id=145, now=NOW, max_age_days=7) == []

@@ -251,6 +251,53 @@ def latest_done_at(entries, board_id: int, done_stack_id: int) -> dict[int, int]
     return out
 
 
+def plan_archive(done_cards, done_at: dict[int, int], email_label_id: int,
+                 now: int, max_age_days: int) -> list[ArchiveAction]:
+    """
+    Pure planner for the archive pass.
+
+    A card is archived when all of the following hold:
+      1. it is in the Done stack (the caller passes only those)
+      2. it carries `email_label_id`
+      3. `done_at` has a record for it — otherwise skip silently, the user
+         archives those by hand
+      4. it has been in Done for at least `max_age_days`
+
+    `max_age_days <= 0` disables the pass entirely.
+    """
+    if max_age_days <= 0:
+        return []
+
+    cutoff_seconds = max_age_days * 86400
+    actions: list[ArchiveAction] = []
+
+    for card in done_cards or []:
+        label_ids = {
+            getattr(label, "id", None)
+            for label in (getattr(card, "labels", None) or [])
+        }
+        if email_label_id not in label_ids:
+            continue
+
+        done_ts = done_at.get(card.id)
+        if done_ts is None:
+            continue
+
+        if now - done_ts < cutoff_seconds:
+            continue
+
+        actions.append(
+            ArchiveAction(
+                stack_id=card.stack_id,
+                card_id=card.id,
+                card_title=getattr(card, "title", "") or "",
+                done_at=done_ts,
+            )
+        )
+
+    return actions
+
+
 def _flagged_flag():
     # Import inside the function so this module stays importable without imap_tools
     # (e.g. in environments that only run the pure-logic tests).
