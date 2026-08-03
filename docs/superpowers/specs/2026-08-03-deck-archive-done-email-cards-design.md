@@ -279,6 +279,6 @@ The 16 record-less cards are archived manually, per decision.
 
 - Archiving cards in stacks other than `Done`.
 - Any change to `make_plan` or to the IMAP side of the sync.
-- Backfilling the 9 cards whose activity records have already expired; those are
+- Backfilling the 16 cards whose activity records have already expired; those are
   archived manually.
 - Raising `activity_expire_days` above 30.

@@ -712,6 +712,14 @@ class TestLatestDoneAt:
         entries = [activity_entry(12, "2026-07-29T12:31:01+00:00", board=4, stack=9)]
         assert latest_done_at(entries, 4, 9) == {12: 1785328261}
 
+    def test_object_id_is_coerced_to_int(self):
+        # The live feed types board/stack ids as strings (handled above via
+        # str() comparison); guard the same possibility for object_id so a
+        # string card id still resolves to the int key plan_archive looks up
+        # via card.id (always int, from the Deck library's parser).
+        entries = [activity_entry("319", "2026-07-29T12:31:01+00:00")]
+        assert latest_done_at(entries, 4, 9) == {319: 1785328261}
+
 
 DAY = 86400
 NOW = 1785328261
@@ -907,7 +915,7 @@ class TestFetchDeckActivity:
 # `imap_deck_sync.MailBox` etc. would have no effect, since that name is
 # never bound at module scope.
 
-EMAIL_LABEL_ID = 145
+ARCHIVE_EMAIL_LABEL_ID = 145
 
 
 def _run_stack(stack_id, title, cards=()):
@@ -958,7 +966,7 @@ class _FakeRunDeck:
         self._activity = list(activity) if activity is not None else []
         self._activity_exc = activity_exc
         self._email_label = email_label or SimpleNamespace(
-            id=EMAIL_LABEL_ID, title="Email", color="808080"
+            id=ARCHIVE_EMAIL_LABEL_ID, title="Email", color="808080"
         )
         self.get_deck_activity_calls = []
         self.created = []
@@ -1060,7 +1068,7 @@ class TestRunArchiveWiring:
         )
 
     def test_eligible_card_is_archived_through_run(self, monkeypatch):
-        eligible = done_card(319, label_ids=(EMAIL_LABEL_ID,), stack_id=9)
+        eligible = done_card(319, label_ids=(ARCHIVE_EMAIL_LABEL_ID,), stack_id=9)
         stacks = [
             _run_stack(7, "Todo"), _run_stack(8, "Doing"),
             _run_stack(9, "Done", cards=[eligible]),
@@ -1076,8 +1084,43 @@ class TestRunArchiveWiring:
         assert rc == 0
         assert deck.archived == [{"stack_id": 9, "card_id": 319}]
 
+    def test_archive_pass_log_line_reports_activity_counts(self, monkeypatch, caplog):
+        # Guards against a broken detection pipeline (renamed field, wrong
+        # board id, disabled Activity app, ...) silently reading as a healthy
+        # idle "0 of N eligible" forever. The two extra counts must appear in
+        # the rendered log line so `len(done_at) == 0` while
+        # `len(activity) > 0` is visible without instrumenting the code.
+        import logging
+        eligible = done_card(319, label_ids=(ARCHIVE_EMAIL_LABEL_ID,), stack_id=9)
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"),
+            _run_stack(9, "Done", cards=[eligible]),
+        ]
+        activity = [
+            activity_entry(319, "2020-01-01T00:00:00+00:00", board="4", stack="9"),
+            # Present in the activity feed but not a move-to-Done record for
+            # this stack — must count toward `activity` but not `done_at`.
+            activity_entry(1, "2020-01-01T00:00:00+00:00", board="4", stack="22"),
+        ]
+        deck = _FakeRunDeck(stacks=stacks, activity=activity)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        config = _run_config(archive_done_after_days=7)
+        with caplog.at_level(logging.INFO):
+            rc = run(config)
+
+        assert rc == 0
+        archive_messages = [
+            rec.getMessage() for rec in caplog.records if "Archive pass" in rec.getMessage()
+        ]
+        assert archive_messages == [
+            "Archive pass: 1 of 1 card(s) in Done eligible "
+            "(2 activity entries, 1 with a move-to-Done record)"
+        ]
+
     def test_archive_actions_do_not_displace_make_plan_actions(self, monkeypatch):
-        eligible = done_card(319, label_ids=(EMAIL_LABEL_ID,), stack_id=9)
+        eligible = done_card(319, label_ids=(ARCHIVE_EMAIL_LABEL_ID,), stack_id=9)
         stacks = [
             _run_stack(7, "Todo"), _run_stack(8, "Doing"),
             _run_stack(9, "Done", cards=[eligible]),

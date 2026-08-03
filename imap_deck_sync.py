@@ -257,7 +257,13 @@ def latest_done_at(entries, board_id: int, done_stack_id: int) -> dict[int, int]
             continue
 
         card_id = entry.get("object_id")
-        if card_id is None or card_id in out:
+        if card_id is None:
+            continue
+        try:
+            card_id = int(card_id)
+        except (TypeError, ValueError):
+            continue
+        if card_id in out:
             continue
 
         ts = _parse_activity_datetime(entry.get("datetime"))
@@ -659,17 +665,21 @@ def run(config: Config) -> int:
             log.error("Failed to fetch Deck activity; skipping archive pass: %s", e)
             activity_failures = 1
         else:
+            done_cards = getattr(done, "cards", None) or []
             done_at = latest_done_at(activity, config.nc_board_id, done.id)
             archive_actions = plan_archive(
-                done_cards=getattr(done, "cards", None) or [],
+                done_cards=done_cards,
                 done_at=done_at,
                 email_label_id=email_label.id,
                 now=int(time.time()),
                 max_age_days=config.archive_done_after_days,
             )
-            log.info("Archive pass: %d of %d card(s) in %s eligible",
-                     len(archive_actions), len(getattr(done, "cards", None) or []),
-                     config.done_stack_name)
+            log.info(
+                "Archive pass: %d of %d card(s) in %s eligible "
+                "(%d activity entries, %d with a move-to-Done record)",
+                len(archive_actions), len(done_cards), config.done_stack_name,
+                len(activity), len(done_at),
+            )
 
     try:
         with MailBox(config.imap_host, port=config.imap_port).login(

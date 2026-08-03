@@ -16,7 +16,7 @@ from pathlib import Path
 # Make the sibling module importable when running this script directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from imap_deck_sync import ARCHIVE_MAX_DAYS_LIMIT, Config, run, validate_archive_days  # noqa: E402
+from imap_deck_sync import Config, run, validate_archive_days  # noqa: E402
 from olen.config import APP_CONFIG
 from olen.const import ATTR_APP, ATTR_LOG
 from olen.log import get_logger
@@ -53,7 +53,7 @@ def main() -> int:
     p.add_argument("--imap-password", default=env("IMAP_PASSWORD"))
     p.add_argument("--imap-folder", default=env("IMAP_FOLDER", "_Virtual/Important"))
     p.add_argument("--archive-done-after-days", type=int,
-                   default=int(env("ARCHIVE_DONE_AFTER_DAYS", "7") or 7),
+                   default=int(env("ARCHIVE_DONE_AFTER_DAYS", "7")),
                    help="Archive Email-labelled cards that have been in Done this "
                         "many days. 0 or less disables the pass.")
 
