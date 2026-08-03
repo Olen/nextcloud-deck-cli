@@ -19,6 +19,7 @@ from imap_deck_sync import (
     plan_archive,
     fetch_managed,
     fetch_starred,
+    fetch_deck_activity,
     execute_plan,
     ExecutionSummary,
     Config,
@@ -866,3 +867,32 @@ class TestConfigArchiveDays:
             imap_folder="_Virtual/Important",
         )
         assert cfg.archive_done_after_days == 7
+
+
+class TestFetchDeckActivity:
+    def test_single_page(self):
+        deck = SimpleNamespace(get_deck_activity=MagicMock(return_value=[
+            {"activity_id": 3}, {"activity_id": 2},
+        ]))
+        assert len(fetch_deck_activity(deck, page_size=200)) == 2
+        deck.get_deck_activity.assert_called_once_with(limit=200, since=None)
+
+    def test_pages_until_short_page(self):
+        pages = [
+            [{"activity_id": i} for i in (5, 4)],
+            [{"activity_id": 3}],
+        ]
+        deck = SimpleNamespace(get_deck_activity=MagicMock(side_effect=pages))
+        assert len(fetch_deck_activity(deck, page_size=2)) == 3
+        assert deck.get_deck_activity.call_args_list[1].kwargs["since"] == 4
+
+    def test_stops_at_max_pages(self):
+        deck = SimpleNamespace(
+            get_deck_activity=MagicMock(return_value=[{"activity_id": 1}, {"activity_id": 1}])
+        )
+        fetch_deck_activity(deck, page_size=2, max_pages=3)
+        assert deck.get_deck_activity.call_count == 3
+
+    def test_empty_first_page(self):
+        deck = SimpleNamespace(get_deck_activity=MagicMock(return_value=[]))
+        assert fetch_deck_activity(deck) == []

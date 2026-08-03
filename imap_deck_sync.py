@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -440,6 +441,33 @@ def execute_plan(plan, mailbox, deck, dry_run: bool = False) -> ExecutionSummary
     return summary
 
 
+def fetch_deck_activity(deck, page_size: int = 200, max_pages: int = 20) -> list[dict]:
+    """
+    Fetch the whole available Deck activity window, newest first.
+
+    Paging back only as far as the archive threshold is not enough: a card with
+    no entry inside that window is ambiguous (moved long ago vs. no record at
+    all), and those two cases must behave differently. Retention is finite
+    (30 days), so fetching everything available is bounded in practice;
+    `max_pages` is only a runaway guard.
+    """
+    entries: list[dict] = []
+    since = None
+
+    for _ in range(max_pages):
+        batch = deck.get_deck_activity(limit=page_size, since=since)
+        if not batch:
+            break
+        entries.extend(batch)
+        if len(batch) < page_size:
+            break
+        since = batch[-1].get("activity_id")
+        if since is None:
+            break
+
+    return entries
+
+
 def fetch_managed(stacks) -> dict[str, ManagedCard]:
     """
     Walk every stack on the board, parse each card's description, and return
@@ -622,6 +650,27 @@ def run(config: Config) -> int:
     managed = fetch_managed(stacks)
     log.info("Found %d managed card(s) on board %s", len(managed), config.nc_board_id)
 
+    archive_actions: list[ArchiveAction] = []
+    activity_failures = 0
+    if config.archive_done_after_days > 0:
+        try:
+            activity = fetch_deck_activity(deck)
+        except Exception as e:
+            log.error("Failed to fetch Deck activity; skipping archive pass: %s", e)
+            activity_failures = 1
+        else:
+            done_at = latest_done_at(activity, config.nc_board_id, done.id)
+            archive_actions = plan_archive(
+                done_cards=getattr(done, "cards", None) or [],
+                done_at=done_at,
+                email_label_id=email_label.id,
+                now=int(time.time()),
+                max_age_days=config.archive_done_after_days,
+            )
+            log.info("Archive pass: %d of %d card(s) in %s eligible",
+                     len(archive_actions), len(getattr(done, "cards", None) or []),
+                     config.done_stack_name)
+
     try:
         with MailBox(config.imap_host, port=config.imap_port).login(
             config.imap_user, config.imap_password, initial_folder=config.imap_folder
@@ -634,7 +683,7 @@ def run(config: Config) -> int:
                 managed=managed,
                 stack_ids=stack_ids,
                 email_label_id=email_label.id,
-            )
+            ) + archive_actions
             log.info("Plan: %d action(s)%s",
                      len(plan), " (dry-run)" if config.dry_run else "")
 
@@ -645,10 +694,13 @@ def run(config: Config) -> int:
         log.error("IMAP/sync failed: %s", e)
         return 1
 
+    summary.failures += activity_failures
+
     log.info(
-        "Done: created=%d moved=%d unstarred=%d labels_assigned=%d failures=%d%s",
+        "Done: created=%d moved=%d unstarred=%d labels_assigned=%d "
+        "archived=%d failures=%d%s",
         summary.created, summary.moved, summary.unstarred,
-        summary.labels_assigned, summary.failures,
+        summary.labels_assigned, summary.archived, summary.failures,
         " (dry-run)" if config.dry_run else "",
     )
     return 0 if summary.failures == 0 else 2
