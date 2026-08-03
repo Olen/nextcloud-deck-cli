@@ -2,6 +2,9 @@
 
 Simple cli tool for Nextcloud Deck
 
+Built on the [nextcloud-deck-client](https://github.com/Olen/nextcloud-deck-client)
+library, which handles the Nextcloud Deck API calls.
+
 ## Usage:
 ```
 nextcloud-deck-list.py [-h] [--url URL] [-u USERNAME] [-p PASSWORD] [-b BOARD_ID] [--include-archived] [--json] [--color] [--pango] [--markdown] [--show-owner]
