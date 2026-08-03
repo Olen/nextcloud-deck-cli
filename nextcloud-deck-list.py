@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from dateutil import parser as dateparser  # built-in on most distros
 from typing import List, Optional
 
-from olen_deck import DeckClient, Stack, Card, Label
+from ncdeck import DeckClient, Stack, Card, Label
 """
 List Nextcloud Deck cards from a board, grouped by lists (stacks).
 

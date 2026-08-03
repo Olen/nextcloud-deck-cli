@@ -5,7 +5,7 @@ import os
 import requests  # just for catching RequestException
 import sys
 
-from olen_deck import DeckClient
+from ncdeck import DeckClient
 """
 Tiny Nextcloud Deck CLI "todo" helper.
 

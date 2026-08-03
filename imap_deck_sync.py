@@ -83,7 +83,7 @@ class StarredMessage:
 class ManagedCard:
     """A Deck card carrying our imap-sync marker."""
     message_id: str
-    card: Any           # olen_deck.Card — kept opaque so the planner is library-agnostic
+    card: Any           # ncdeck.Card — kept opaque so the planner is library-agnostic
     stack_id: int
     label_ids: frozenset[int] = frozenset()
 
@@ -106,7 +106,7 @@ class UnstarAction:
 @dataclass(frozen=True)
 class MoveToDoneAction:
     """Move a Deck card to the Done stack."""
-    card: Any           # olen_deck.Card
+    card: Any           # ncdeck.Card
     target_stack_id: int
 
 
@@ -354,7 +354,7 @@ def execute_plan(plan, mailbox, deck, dry_run: bool = False) -> ExecutionSummary
 
     `mailbox` must duck-type as imap_tools.MailBox (we call
     `.flag(uids, {FLAGGED}, False)`).
-    `deck` must duck-type as olen_deck.DeckClient (we call `.create_card(...)`,
+    `deck` must duck-type as ncdeck.DeckClient (we call `.create_card(...)`,
     `.move_card(...)`, `.assign_label(...)`, and `.archive_card(...)`).
     """
     summary = ExecutionSummary()
@@ -609,7 +609,7 @@ def run(config: Config) -> int:
       2 — sync completed but at least one per-action failure occurred
     """
     from imap_tools import MailBox
-    from olen_deck import DeckClient
+    from ncdeck import DeckClient
 
     deck = DeckClient(
         config.nc_url,

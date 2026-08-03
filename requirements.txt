@@ -1,4 +1,3 @@
 imap-tools>=1.0
-# olen_deck is installed from the private Olen PyPI index
-olen-deck>=0.3.0
+nextcloud-deck-client>=0.4.0
 # olen is installed from the private Olen PyPI index

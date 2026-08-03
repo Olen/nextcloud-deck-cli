@@ -267,13 +267,13 @@ class TestMakePlan:
 
 
 class _FakeLabel:
-    """Minimal stand-in for olen_deck.Label."""
+    """Minimal stand-in for ncdeck.Label."""
     def __init__(self, id):
         self.id = id
 
 
 class _FakeCard:
-    """Minimal stand-in for olen_deck.Card."""
+    """Minimal stand-in for ncdeck.Card."""
     def __init__(self, id, description="", stack_id=None, labels=None):
         self.id = id
         self.description = description
@@ -910,7 +910,7 @@ class TestFetchDeckActivity:
 # --- run() wiring: fakes for the archive-pass integration ---
 #
 # run() imports its IO dependencies *inside the function body*
-# (`from imap_tools import MailBox`, `from olen_deck import DeckClient`), so
+# (`from imap_tools import MailBox`, `from ncdeck import DeckClient`), so
 # tests must patch the attribute on the source module — patching
 # `imap_deck_sync.MailBox` etc. would have no effect, since that name is
 # never bound at module scope.
@@ -1025,7 +1025,7 @@ def _run_config(**overrides):
 
 class TestRunArchiveWiring:
     def _patch_deps(self, monkeypatch, deck, mailbox):
-        monkeypatch.setattr("olen_deck.DeckClient", lambda *a, **kw: deck)
+        monkeypatch.setattr("ncdeck.DeckClient", lambda *a, **kw: deck)
         monkeypatch.setattr("imap_tools.MailBox", _fake_mailbox_class(mailbox))
 
     def test_archive_pass_skipped_when_disabled(self, monkeypatch):
