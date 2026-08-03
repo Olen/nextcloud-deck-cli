@@ -1,6 +1,8 @@
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from imap_deck_sync import (
+    ARCHIVE_MAX_DAYS_LIMIT,
     parse_marker,
     build_marker,
     format_card_title,
@@ -10,12 +12,19 @@ from imap_deck_sync import (
     MoveToDoneAction,
     CreateCardAction,
     AssignLabelAction,
+    ArchiveAction,
     StackIds,
     make_plan,
+    latest_done_at,
+    plan_archive,
     fetch_managed,
     fetch_starred,
+    fetch_deck_activity,
     execute_plan,
     ExecutionSummary,
+    Config,
+    validate_archive_days,
+    run,
 )
 
 
@@ -627,3 +636,503 @@ class TestFindOrCreateEmailLabel:
         deck = _FakeDeckLabels(existing_labels=[], create_returns=None)
         with pytest.raises(RuntimeError, match="Email"):
             _find_or_create_email_label(deck, board_id=4, name="Email", color="808080")
+
+
+def activity_entry(card_id, when, board="4", stack="9",
+                   stack_before="22", object_type="deck_card", subject="You have moved the card X"):
+    """Build an activity entry shaped like the real Nextcloud response."""
+    params = {"board": {"id": board}, "stack": {"id": stack}}
+    if stack_before is not None:
+        params["stackBefore"] = {"id": stack_before}
+    return {
+        "object_type": object_type,
+        "object_id": card_id,
+        "datetime": when,
+        "subject": subject,
+        "subject_rich": ["template", params],
+    }
+
+
+class TestLatestDoneAt:
+    def test_extracts_move_to_done(self):
+        entries = [activity_entry(319, "2026-07-29T12:31:01+00:00")]
+        assert latest_done_at(entries, board_id=4, done_stack_id=9) == {319: 1785328261}
+
+    def test_newest_first_wins_for_repeated_moves(self):
+        entries = [
+            activity_entry(7, "2026-07-29T12:31:01+00:00"),
+            activity_entry(7, "2026-06-01T00:00:00+00:00"),
+        ]
+        assert latest_done_at(entries, 4, 9) == {7: 1785328261}
+
+    def test_ignores_other_boards(self):
+        entries = [activity_entry(7, "2026-07-29T12:31:01+00:00", board="8")]
+        assert latest_done_at(entries, 4, 9) == {}
+
+    def test_ignores_other_stacks(self):
+        entries = [activity_entry(7, "2026-07-29T12:31:01+00:00", stack="22")]
+        assert latest_done_at(entries, 4, 9) == {}
+
+    def test_ignores_entries_without_stack_before(self):
+        # "You have removed the tag X from card Y in list Done" - has stack, no stackBefore
+        entries = [activity_entry(7, "2026-07-29T12:31:01+00:00", stack_before=None,
+                                  subject="You have removed the tag Email from card Y")]
+        assert latest_done_at(entries, 4, 9) == {}
+
+    def test_does_not_string_match_subject(self):
+        # Guards the "removed" substring trap: no stackBefore means not a move,
+        # even though the subject contains the letters "moved".
+        entries = [activity_entry(7, "2026-07-29T12:31:01+00:00", stack_before=None,
+                                  subject="You have removed the tag 10 from card Coca Cola")]
+        assert latest_done_at(entries, 4, 9) == {}
+
+    def test_ignores_non_card_object_types(self):
+        entries = [activity_entry(7, "2026-07-29T12:31:01+00:00", object_type="deck_board")]
+        assert latest_done_at(entries, 4, 9) == {}
+
+    def test_empty_input(self):
+        assert latest_done_at([], 4, 9) == {}
+
+    def test_malformed_entries_are_skipped_not_fatal(self):
+        entries = [
+            {"object_type": "deck_card", "object_id": 1},                      # no subject_rich
+            {"object_type": "deck_card", "object_id": 2, "subject_rich": []},   # empty
+            {"object_type": "deck_card", "object_id": 3, "subject_rich": ["t"]},  # no params
+            {"object_type": "deck_card", "object_id": 4, "subject_rich": ["t", None]},
+            activity_entry(9, "not-a-date"),
+            activity_entry(10, "2026-07-29T12:31:01+00:00"),
+        ]
+        assert latest_done_at(entries, 4, 9) == {10: 1785328261}
+
+    def test_naive_datetime_is_treated_as_utc(self):
+        entries = [activity_entry(11, "2026-07-29T12:31:01")]
+        assert latest_done_at(entries, 4, 9) == {11: 1785328261}
+
+    def test_ids_may_be_strings_or_ints(self):
+        entries = [activity_entry(12, "2026-07-29T12:31:01+00:00", board=4, stack=9)]
+        assert latest_done_at(entries, 4, 9) == {12: 1785328261}
+
+    def test_object_id_is_coerced_to_int(self):
+        # The live feed types board/stack ids as strings (handled above via
+        # str() comparison); guard the same possibility for object_id so a
+        # string card id still resolves to the int key plan_archive looks up
+        # via card.id (always int, from the Deck library's parser).
+        entries = [activity_entry("319", "2026-07-29T12:31:01+00:00")]
+        assert latest_done_at(entries, 4, 9) == {319: 1785328261}
+
+
+DAY = 86400
+NOW = 1785328261
+
+
+def done_card(card_id, label_ids=(145,), title="A card", stack_id=9):
+    return SimpleNamespace(
+        id=card_id,
+        title=title,
+        stack_id=stack_id,
+        labels=[SimpleNamespace(id=lid) for lid in label_ids],
+    )
+
+
+class TestPlanArchive:
+    def test_archives_card_past_threshold(self):
+        cards = [done_card(1)]
+        done_at = {1: NOW - 8 * DAY}
+        actions = plan_archive(cards, done_at, email_label_id=145,
+                               now=NOW, max_age_days=7)
+        assert actions == [ArchiveAction(stack_id=9, card_id=1,
+                                         card_title="A card",
+                                         done_at=NOW - 8 * DAY)]
+
+    def test_exact_boundary_archives(self):
+        actions = plan_archive([done_card(1)], {1: NOW - 7 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert len(actions) == 1
+
+    def test_one_second_under_threshold_waits(self):
+        actions = plan_archive([done_card(1)], {1: NOW - 7 * DAY + 1},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert actions == []
+
+    def test_card_without_email_label_is_skipped(self):
+        actions = plan_archive([done_card(1, label_ids=(999,))], {1: NOW - 30 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert actions == []
+
+    def test_card_with_no_labels_is_skipped(self):
+        actions = plan_archive([done_card(1, label_ids=())], {1: NOW - 30 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert actions == []
+
+    def test_card_without_done_at_record_is_skipped(self):
+        actions = plan_archive([done_card(1)], {},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert actions == []
+
+    def test_zero_days_disables_pass(self):
+        actions = plan_archive([done_card(1)], {1: NOW - 99 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=0)
+        assert actions == []
+
+    def test_negative_days_disables_pass(self):
+        actions = plan_archive([done_card(1)], {1: NOW - 99 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=-1)
+        assert actions == []
+
+    def test_mixed_set_yields_only_eligible(self):
+        cards = [
+            done_card(1),                                  # eligible
+            done_card(2, label_ids=(999,)),                # wrong label
+            done_card(3),                                  # too recent
+            done_card(4),                                  # no record
+        ]
+        done_at = {1: NOW - 10 * DAY, 2: NOW - 10 * DAY, 3: NOW - 1 * DAY}
+        actions = plan_archive(cards, done_at, email_label_id=145,
+                               now=NOW, max_age_days=7)
+        assert [a.card_id for a in actions] == [1]
+
+    def test_uses_each_cards_own_stack_id(self):
+        actions = plan_archive([done_card(1, stack_id=42)], {1: NOW - 10 * DAY},
+                               email_label_id=145, now=NOW, max_age_days=7)
+        assert actions[0].stack_id == 42
+
+    def test_empty_inputs(self):
+        assert plan_archive([], {}, email_label_id=145, now=NOW, max_age_days=7) == []
+
+
+class TestExecuteArchiveAction:
+    def _deck(self):
+        return SimpleNamespace(archive_card=MagicMock(return_value=None))
+
+    def test_calls_archive_card_with_stack_and_id(self):
+        deck = self._deck()
+        plan = [ArchiveAction(stack_id=9, card_id=319,
+                              card_title="X", done_at=NOW - 10 * DAY)]
+
+        summary = execute_plan(plan=plan, mailbox=None, deck=deck, dry_run=False)
+
+        deck.archive_card.assert_called_once_with(stack_id=9, card_id=319)
+        assert summary.archived == 1
+        assert summary.failures == 0
+
+    def test_dry_run_makes_no_api_call(self):
+        deck = self._deck()
+        plan = [ArchiveAction(stack_id=9, card_id=319,
+                              card_title="X", done_at=NOW - 10 * DAY)]
+
+        summary = execute_plan(plan=plan, mailbox=None, deck=deck, dry_run=True)
+
+        deck.archive_card.assert_not_called()
+        assert summary.archived == 1
+
+    def test_failure_is_counted_and_others_still_run(self):
+        deck = SimpleNamespace(
+            archive_card=MagicMock(side_effect=[RuntimeError("boom"), None])
+        )
+        plan = [
+            ArchiveAction(stack_id=9, card_id=1, card_title="A", done_at=1),
+            ArchiveAction(stack_id=9, card_id=2, card_title="B", done_at=1),
+        ]
+
+        summary = execute_plan(plan=plan, mailbox=None, deck=deck, dry_run=False)
+
+        assert deck.archive_card.call_count == 2
+        assert summary.archived == 1
+        assert summary.failures == 1
+
+
+class TestValidateArchiveDays:
+    def test_rejects_at_the_limit(self):
+        err = validate_archive_days(ARCHIVE_MAX_DAYS_LIMIT)
+        assert err is not None
+        assert str(ARCHIVE_MAX_DAYS_LIMIT) in err
+
+    def test_rejects_above_the_limit(self):
+        assert validate_archive_days(30) is not None
+
+    def test_accepts_just_below_the_limit(self):
+        assert validate_archive_days(ARCHIVE_MAX_DAYS_LIMIT - 1) is None
+
+    def test_accepts_the_default(self):
+        assert validate_archive_days(7) is None
+
+    def test_accepts_zero_which_disables_the_pass(self):
+        assert validate_archive_days(0) is None
+
+    def test_accepts_negative_which_disables_the_pass(self):
+        assert validate_archive_days(-1) is None
+
+    def test_message_reports_the_offending_value(self):
+        assert "99" in validate_archive_days(99)
+
+
+class TestConfigArchiveDays:
+    def test_config_defaults_to_seven_days(self):
+        cfg = Config(
+            nc_url="u", nc_username="u", nc_password="p", nc_board_id=4,
+            todo_stack_name="Todo", doing_stack_name="Doing", done_stack_name="Done",
+            email_label_name="Email", email_label_color="808080",
+            imap_host="h", imap_port=993, imap_user="u", imap_password="p",
+            imap_folder="_Virtual/Important",
+        )
+        assert cfg.archive_done_after_days == 7
+
+
+class TestFetchDeckActivity:
+    def test_single_page(self):
+        deck = SimpleNamespace(get_deck_activity=MagicMock(return_value=[
+            {"activity_id": 3}, {"activity_id": 2},
+        ]))
+        assert len(fetch_deck_activity(deck, page_size=200)) == 2
+        deck.get_deck_activity.assert_called_once_with(limit=200, since=None)
+
+    def test_pages_until_short_page(self):
+        pages = [
+            [{"activity_id": i} for i in (5, 4)],
+            [{"activity_id": 3}],
+        ]
+        deck = SimpleNamespace(get_deck_activity=MagicMock(side_effect=pages))
+        assert len(fetch_deck_activity(deck, page_size=2)) == 3
+        assert deck.get_deck_activity.call_args_list[1].kwargs["since"] == 4
+
+    def test_stops_at_max_pages(self):
+        deck = SimpleNamespace(
+            get_deck_activity=MagicMock(return_value=[{"activity_id": 1}, {"activity_id": 1}])
+        )
+        fetch_deck_activity(deck, page_size=2, max_pages=3)
+        assert deck.get_deck_activity.call_count == 3
+
+    def test_empty_first_page(self):
+        deck = SimpleNamespace(get_deck_activity=MagicMock(return_value=[]))
+        assert fetch_deck_activity(deck) == []
+
+
+# --- run() wiring: fakes for the archive-pass integration ---
+#
+# run() imports its IO dependencies *inside the function body*
+# (`from imap_tools import MailBox`, `from olen_deck import DeckClient`), so
+# tests must patch the attribute on the source module — patching
+# `imap_deck_sync.MailBox` etc. would have no effect, since that name is
+# never bound at module scope.
+
+ARCHIVE_EMAIL_LABEL_ID = 145
+
+
+def _run_stack(stack_id, title, cards=()):
+    return SimpleNamespace(id=stack_id, title=title, cards=list(cards))
+
+
+class _FakeRunMailbox:
+    """Stands in for the `with MailBox(...).login(...) as mailbox:` object.
+
+    Combines fetch() (read starred messages) and flag() (unstar), and is its
+    own context manager so `MailBox(...).login(...)` can just return it.
+    """
+    def __init__(self, messages=()):
+        self.messages = list(messages)
+        self.flag_calls = []
+
+    def fetch(self, mark_seen=False, bulk=True):
+        return iter(self.messages)
+
+    def flag(self, uids, flag_set, value):
+        uid_list = [uids] if isinstance(uids, str) else list(uids)
+        self.flag_calls.append((uid_list, flag_set, value))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def _fake_mailbox_class(fake_mailbox):
+    """Returns a stand-in for the `imap_tools.MailBox` class/constructor."""
+    class _FakeMailBox:
+        def __init__(self, host, port=None):
+            pass
+
+        def login(self, user, password, initial_folder=None):
+            return fake_mailbox
+
+    return _FakeMailBox
+
+
+class _FakeRunDeck:
+    """DeckClient stand-in exercising every method run() can call."""
+    def __init__(self, stacks, activity=None, activity_exc=None,
+                 email_label=None):
+        self._stacks = stacks
+        self._activity = list(activity) if activity is not None else []
+        self._activity_exc = activity_exc
+        self._email_label = email_label or SimpleNamespace(
+            id=ARCHIVE_EMAIL_LABEL_ID, title="Email", color="808080"
+        )
+        self.get_deck_activity_calls = []
+        self.created = []
+        self.moved = []
+        self.assigned = []
+        self.archived = []
+        self._next_card_id = 5000
+
+    def fetch_stacks(self, include_archived=False):
+        return self._stacks
+
+    def get_board_labels(self, board_id=None):
+        return [self._email_label]
+
+    def create_label(self, board_id=None, title="", color="808080"):
+        raise AssertionError("create_label should not be needed; label already exists")
+
+    def get_deck_activity(self, limit=200, since=None):
+        self.get_deck_activity_calls.append({"limit": limit, "since": since})
+        if self._activity_exc is not None:
+            raise self._activity_exc
+        return self._activity
+
+    def create_card(self, stack_id, title, description="", **kwargs):
+        self._next_card_id += 1
+        card = SimpleNamespace(
+            id=self._next_card_id, title=title, stack_id=stack_id, description=description,
+        )
+        self.created.append({"stack_id": stack_id, "title": title})
+        return card
+
+    def move_card(self, card, target_stack_id):
+        self.moved.append({"card_id": card.id, "target": target_stack_id})
+        card.stack_id = target_stack_id
+        return card
+
+    def assign_label(self, stack_id, card_id, label_id, **kwargs):
+        self.assigned.append({"stack_id": stack_id, "card_id": card_id, "label_id": label_id})
+
+    def archive_card(self, stack_id, card_id, board_id=None):
+        self.archived.append({"stack_id": stack_id, "card_id": card_id})
+
+
+def _run_config(**overrides):
+    fields = dict(
+        nc_url="https://cloud.example.com", nc_username="u", nc_password="p",
+        nc_board_id=4,
+        todo_stack_name="Todo", doing_stack_name="Doing", done_stack_name="Done",
+        email_label_name="Email", email_label_color="808080",
+        imap_host="imap.example.com", imap_port=993, imap_user="u", imap_password="p",
+        imap_folder="_Virtual/Important",
+    )
+    fields.update(overrides)
+    return Config(**fields)
+
+
+class TestRunArchiveWiring:
+    def _patch_deps(self, monkeypatch, deck, mailbox):
+        monkeypatch.setattr("olen_deck.DeckClient", lambda *a, **kw: deck)
+        monkeypatch.setattr("imap_tools.MailBox", _fake_mailbox_class(mailbox))
+
+    def test_archive_pass_skipped_when_disabled(self, monkeypatch):
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"), _run_stack(9, "Done"),
+        ]
+        deck = _FakeRunDeck(stacks=stacks)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        config = _run_config(archive_done_after_days=0)
+        rc = run(config)
+
+        assert rc == 0
+        assert deck.get_deck_activity_calls == []
+        assert deck.archived == []
+
+    def test_activity_fetch_failure_is_counted_not_silent(self, monkeypatch, caplog):
+        import logging
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"), _run_stack(9, "Done"),
+        ]
+        deck = _FakeRunDeck(stacks=stacks, activity_exc=RuntimeError("activity API down"))
+        # An unstarred-in-managed-sense, newly-starred message with no matching
+        # managed card: make_plan's Pass C turns this into a CreateCardAction,
+        # proving the main sync still ran to completion.
+        mailbox = _FakeRunMailbox(messages=[_imap_msg(uid="1", message_id="<new@x>")])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        config = _run_config(archive_done_after_days=7)
+        with caplog.at_level(logging.ERROR):
+            rc = run(config)
+
+        assert rc == 2
+        assert deck.archived == []
+        assert deck.created  # main IMAP<->Deck sync still completed
+        assert any(
+            rec.levelno == logging.ERROR and "activity" in rec.message.lower()
+            for rec in caplog.records
+        )
+
+    def test_eligible_card_is_archived_through_run(self, monkeypatch):
+        eligible = done_card(319, label_ids=(ARCHIVE_EMAIL_LABEL_ID,), stack_id=9)
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"),
+            _run_stack(9, "Done", cards=[eligible]),
+        ]
+        activity = [activity_entry(319, "2020-01-01T00:00:00+00:00", board="4", stack="9")]
+        deck = _FakeRunDeck(stacks=stacks, activity=activity)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        config = _run_config(archive_done_after_days=7)
+        rc = run(config)
+
+        assert rc == 0
+        assert deck.archived == [{"stack_id": 9, "card_id": 319}]
+
+    def test_archive_pass_log_line_reports_activity_counts(self, monkeypatch, caplog):
+        # Guards against a broken detection pipeline (renamed field, wrong
+        # board id, disabled Activity app, ...) silently reading as a healthy
+        # idle "0 of N eligible" forever. The two extra counts must appear in
+        # the rendered log line so `len(done_at) == 0` while
+        # `len(activity) > 0` is visible without instrumenting the code.
+        import logging
+        eligible = done_card(319, label_ids=(ARCHIVE_EMAIL_LABEL_ID,), stack_id=9)
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"),
+            _run_stack(9, "Done", cards=[eligible]),
+        ]
+        activity = [
+            activity_entry(319, "2020-01-01T00:00:00+00:00", board="4", stack="9"),
+            # Present in the activity feed but not a move-to-Done record for
+            # this stack — must count toward `activity` but not `done_at`.
+            activity_entry(1, "2020-01-01T00:00:00+00:00", board="4", stack="22"),
+        ]
+        deck = _FakeRunDeck(stacks=stacks, activity=activity)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        config = _run_config(archive_done_after_days=7)
+        with caplog.at_level(logging.INFO):
+            rc = run(config)
+
+        assert rc == 0
+        archive_messages = [
+            rec.getMessage() for rec in caplog.records if "Archive pass" in rec.getMessage()
+        ]
+        assert archive_messages == [
+            "Archive pass: 1 of 1 card(s) in Done eligible "
+            "(2 activity entries, 1 with a move-to-Done record)"
+        ]
+
+    def test_archive_actions_do_not_displace_make_plan_actions(self, monkeypatch):
+        eligible = done_card(319, label_ids=(ARCHIVE_EMAIL_LABEL_ID,), stack_id=9)
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"),
+            _run_stack(9, "Done", cards=[eligible]),
+        ]
+        activity = [activity_entry(319, "2020-01-01T00:00:00+00:00", board="4", stack="9")]
+        deck = _FakeRunDeck(stacks=stacks, activity=activity)
+        mailbox = _FakeRunMailbox(messages=[_imap_msg(uid="1", message_id="<new@x>")])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        config = _run_config(archive_done_after_days=7)
+        rc = run(config)
+
+        assert rc == 0
+        assert deck.created  # make_plan's CreateCardAction reached execute_plan
+        assert deck.archived == [{"stack_id": 9, "card_id": 319}]

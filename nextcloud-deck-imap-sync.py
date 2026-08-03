@@ -16,7 +16,7 @@ from pathlib import Path
 # Make the sibling module importable when running this script directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from imap_deck_sync import Config, run  # noqa: E402
+from imap_deck_sync import Config, run, validate_archive_days  # noqa: E402
 from olen.config import APP_CONFIG
 from olen.const import ATTR_APP, ATTR_LOG
 from olen.log import get_logger
@@ -52,6 +52,10 @@ def main() -> int:
     p.add_argument("--imap-user", default=env("IMAP_USER"))
     p.add_argument("--imap-password", default=env("IMAP_PASSWORD"))
     p.add_argument("--imap-folder", default=env("IMAP_FOLDER", "_Virtual/Important"))
+    p.add_argument("--archive-done-after-days", type=int,
+                   default=int(env("ARCHIVE_DONE_AFTER_DAYS", "7")),
+                   help="Archive Email-labelled cards that have been in Done this "
+                        "many days. 0 or less disables the pass.")
 
     # Modes
     p.add_argument("--dry-run", action="store_true",
@@ -92,6 +96,11 @@ def main() -> int:
         print(f"Missing required argument(s): {', '.join(missing)}", file=sys.stderr)
         return 2
 
+    err = validate_archive_days(args.archive_done_after_days)
+    if err:
+        print(err, file=sys.stderr)
+        return 2
+
     cfg = Config(
         nc_url=args.url,
         nc_username=args.username,
@@ -107,6 +116,7 @@ def main() -> int:
         imap_user=args.imap_user,
         imap_password=args.imap_password,
         imap_folder=args.imap_folder,
+        archive_done_after_days=args.archive_done_after_days,
         dry_run=args.dry_run,
         verbose=args.verbose,
     )

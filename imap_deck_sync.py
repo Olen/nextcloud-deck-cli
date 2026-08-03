@@ -10,12 +10,30 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
 
 
+# Nextcloud's activity_expire_days is 30 on this deployment. A threshold at or
+# near that value means records expire before a card can qualify, so archiving
+# would silently stop. Refuse thresholds that leave no headroom.
+ARCHIVE_MAX_DAYS_LIMIT = 25
+
 MARKER_RE = re.compile(r"<!--\s*imap-sync:\s*message-id=(\S.*?)\s*-->", re.DOTALL)
+
+
+def validate_archive_days(days: int) -> str | None:
+    """Return an error message if the threshold is unusable, else None."""
+    if days >= ARCHIVE_MAX_DAYS_LIMIT:
+        return (
+            f"--archive-done-after-days must be below {ARCHIVE_MAX_DAYS_LIMIT} "
+            f"(got {days}). Nextcloud keeps only 30 days of activity, so a "
+            f"larger window would silently archive nothing."
+        )
+    return None
 
 
 def build_marker(message_id: str) -> str:
@@ -110,7 +128,19 @@ class AssignLabelAction:
     label_id: int
 
 
-Action = UnstarAction | MoveToDoneAction | CreateCardAction | AssignLabelAction
+@dataclass(frozen=True)
+class ArchiveAction:
+    """Archive a Deck card that has aged out of the Done stack."""
+    stack_id: int
+    card_id: int
+    card_title: str
+    done_at: int
+
+
+Action = (
+    UnstarAction | MoveToDoneAction | CreateCardAction
+    | AssignLabelAction | ArchiveAction
+)
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +211,116 @@ def make_plan(
     return actions
 
 
+def _parse_activity_datetime(value) -> Optional[int]:
+    """ISO-8601 (usually offset-aware UTC) -> epoch seconds, or None."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def latest_done_at(entries, board_id: int, done_stack_id: int) -> dict[int, int]:
+    """
+    Map card id -> epoch seconds of the card's most recent move into the Done
+    stack, from Nextcloud activity entries.
+
+    `entries` must be newest-first (as the API returns them), so the first
+    match for a card wins. That is what makes a card moved Todo->Done->Todo->Done
+    resolve to its latest arrival.
+
+    A move is identified by the presence of `stackBefore` in the rich-subject
+    parameters. Never string-match `subject`: "moved" also matches "removed",
+    and the text is localised.
+    """
+    out: dict[int, int] = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("object_type") != "deck_card":
+            continue
+
+        rich = entry.get("subject_rich") or []
+        params = rich[1] if len(rich) > 1 and isinstance(rich[1], dict) else {}
+        if "stackBefore" not in params:
+            continue
+
+        board = params.get("board") or {}
+        stack = params.get("stack") or {}
+        if str(board.get("id")) != str(board_id):
+            continue
+        if str(stack.get("id")) != str(done_stack_id):
+            continue
+
+        card_id = entry.get("object_id")
+        if card_id is None:
+            continue
+        try:
+            card_id = int(card_id)
+        except (TypeError, ValueError):
+            continue
+        if card_id in out:
+            continue
+
+        ts = _parse_activity_datetime(entry.get("datetime"))
+        if ts is None:
+            continue
+        out[card_id] = ts
+
+    return out
+
+
+def plan_archive(done_cards, done_at: dict[int, int], email_label_id: int,
+                 now: int, max_age_days: int) -> list[ArchiveAction]:
+    """
+    Pure planner for the archive pass.
+
+    A card is archived when all of the following hold:
+      1. it is in the Done stack (the caller passes only those)
+      2. it carries `email_label_id`
+      3. `done_at` has a record for it — otherwise skip silently, the user
+         archives those by hand
+      4. it has been in Done for at least `max_age_days`
+
+    `max_age_days <= 0` disables the pass entirely.
+    """
+    if max_age_days <= 0:
+        return []
+
+    cutoff_seconds = max_age_days * 86400
+    actions: list[ArchiveAction] = []
+
+    for card in done_cards or []:
+        label_ids = {
+            getattr(label, "id", None)
+            for label in (getattr(card, "labels", None) or [])
+        }
+        if email_label_id not in label_ids:
+            continue
+
+        done_ts = done_at.get(card.id)
+        if done_ts is None:
+            continue
+
+        if now - done_ts < cutoff_seconds:
+            continue
+
+        actions.append(
+            ArchiveAction(
+                stack_id=card.stack_id,
+                card_id=card.id,
+                card_title=getattr(card, "title", "") or "",
+                done_at=done_ts,
+            )
+        )
+
+    return actions
+
+
 def _flagged_flag():
     # Import inside the function so this module stays importable without imap_tools
     # (e.g. in environments that only run the pure-logic tests).
@@ -195,6 +335,7 @@ class ExecutionSummary:
     moved: int = 0
     unstarred: int = 0
     labels_assigned: int = 0
+    archived: int = 0
     failures: int = 0
 
 
@@ -214,7 +355,7 @@ def execute_plan(plan, mailbox, deck, dry_run: bool = False) -> ExecutionSummary
     `mailbox` must duck-type as imap_tools.MailBox (we call
     `.flag(uids, {FLAGGED}, False)`).
     `deck` must duck-type as olen_deck.DeckClient (we call `.create_card(...)`,
-    `.move_card(...)`, and `.assign_label(...)`).
+    `.move_card(...)`, `.assign_label(...)`, and `.archive_card(...)`).
     """
     summary = ExecutionSummary()
 
@@ -285,6 +426,16 @@ def execute_plan(plan, mailbox, deck, dry_run: bool = False) -> ExecutionSummary
                     )
                 summary.labels_assigned += 1
 
+            elif isinstance(action, ArchiveAction):
+                if dry_run:
+                    log.info("[dry-run] would archive card #%s %r (in Done since %s)",
+                             action.card_id, action.card_title, action.done_at)
+                else:
+                    log.info("Archiving card #%s %r (in Done since %s)",
+                             action.card_id, action.card_title, action.done_at)
+                    deck.archive_card(stack_id=action.stack_id, card_id=action.card_id)
+                summary.archived += 1
+
             else:
                 log.warning("Unknown action type %r — skipping", type(action).__name__)
                 summary.failures += 1
@@ -294,6 +445,33 @@ def execute_plan(plan, mailbox, deck, dry_run: bool = False) -> ExecutionSummary
             summary.failures += 1
 
     return summary
+
+
+def fetch_deck_activity(deck, page_size: int = 200, max_pages: int = 20) -> list[dict]:
+    """
+    Fetch the whole available Deck activity window, newest first.
+
+    Paging back only as far as the archive threshold is not enough: a card with
+    no entry inside that window is ambiguous (moved long ago vs. no record at
+    all), and those two cases must behave differently. Retention is finite
+    (30 days), so fetching everything available is bounded in practice;
+    `max_pages` is only a runaway guard.
+    """
+    entries: list[dict] = []
+    since = None
+
+    for _ in range(max_pages):
+        batch = deck.get_deck_activity(limit=page_size, since=since)
+        if not batch:
+            break
+        entries.extend(batch)
+        if len(batch) < page_size:
+            break
+        since = batch[-1].get("activity_id")
+        if since is None:
+            break
+
+    return entries
 
 
 def fetch_managed(stacks) -> dict[str, ManagedCard]:
@@ -394,6 +572,7 @@ class Config:
     imap_user: str
     imap_password: str
     imap_folder: str
+    archive_done_after_days: int = 7
     dry_run: bool = False
     verbose: bool = False
 
@@ -477,6 +656,31 @@ def run(config: Config) -> int:
     managed = fetch_managed(stacks)
     log.info("Found %d managed card(s) on board %s", len(managed), config.nc_board_id)
 
+    archive_actions: list[ArchiveAction] = []
+    activity_failures = 0
+    if config.archive_done_after_days > 0:
+        try:
+            activity = fetch_deck_activity(deck)
+        except Exception as e:
+            log.error("Failed to fetch Deck activity; skipping archive pass: %s", e)
+            activity_failures = 1
+        else:
+            done_cards = getattr(done, "cards", None) or []
+            done_at = latest_done_at(activity, config.nc_board_id, done.id)
+            archive_actions = plan_archive(
+                done_cards=done_cards,
+                done_at=done_at,
+                email_label_id=email_label.id,
+                now=int(time.time()),
+                max_age_days=config.archive_done_after_days,
+            )
+            log.info(
+                "Archive pass: %d of %d card(s) in %s eligible "
+                "(%d activity entries, %d with a move-to-Done record)",
+                len(archive_actions), len(done_cards), config.done_stack_name,
+                len(activity), len(done_at),
+            )
+
     try:
         with MailBox(config.imap_host, port=config.imap_port).login(
             config.imap_user, config.imap_password, initial_folder=config.imap_folder
@@ -489,7 +693,7 @@ def run(config: Config) -> int:
                 managed=managed,
                 stack_ids=stack_ids,
                 email_label_id=email_label.id,
-            )
+            ) + archive_actions
             log.info("Plan: %d action(s)%s",
                      len(plan), " (dry-run)" if config.dry_run else "")
 
@@ -500,10 +704,13 @@ def run(config: Config) -> int:
         log.error("IMAP/sync failed: %s", e)
         return 1
 
+    summary.failures += activity_failures
+
     log.info(
-        "Done: created=%d moved=%d unstarred=%d labels_assigned=%d failures=%d%s",
+        "Done: created=%d moved=%d unstarred=%d labels_assigned=%d "
+        "archived=%d failures=%d%s",
         summary.created, summary.moved, summary.unstarred,
-        summary.labels_assigned, summary.failures,
+        summary.labels_assigned, summary.archived, summary.failures,
         " (dry-run)" if config.dry_run else "",
     )
     return 0 if summary.failures == 0 else 2
