@@ -659,9 +659,11 @@ Read `.github/workflows/*.yml` first and run each test and lint command it defin
 Run: `cd ~/prog/nextcloud-deck-client && ruff check ncdeck tests && python -m pytest tests/ -v`
 Expected: no lint findings, all tests pass.
 
-- [ ] **Step 4: Commit and push, which triggers the OIDC release**
+- [ ] **Step 4: Commit, merge to main, and push main to trigger the OIDC release**
 
-Publishing is a GitHub Actions trusted-publisher workflow that fires on a push touching `pyproject.toml`. There is no API token to supply.
+Publishing is a GitHub Actions trusted-publisher workflow. There is no API token to supply, but `.github/workflows/release.yml` fires **only on a push to `main` that touches `pyproject.toml`** — pushing the feature branch alone publishes nothing.
+
+Tasks 1-3 are committed on `feat/ncdeck-1.1`. Merge that branch to `main` and push `main`:
 
 ```bash
 cd ~/prog/nextcloud-deck-client
@@ -671,8 +673,12 @@ git commit -m "release: 1.1.0
 Adds patch_card, move_card(clear_done=), and Card.done / Card.deleted_at.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
-git push
+git checkout main
+git merge --no-ff feat/ncdeck-1.1 -m "Merge branch 'feat/ncdeck-1.1'"
+git push origin main
 ```
+
+Stay on `main` afterwards — this repo's work is finished once the release is out.
 
 - [ ] **Step 5: Watch the release workflow to completion**
 
