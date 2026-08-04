@@ -5,7 +5,7 @@ import os
 import requests  # just for catching RequestException
 import sys
 
-from ncdeck import DeckClient
+from ncdeck import DeckClient, find_card_by_title, find_stack_by_name
 """
 Tiny Nextcloud Deck CLI "todo" helper.
 
@@ -102,14 +102,14 @@ def main() -> None:
 
     # First fetch stacks (with cards) so we can resolve names
     try:
-        stacks = client.fetch_stacks(include_archived=True)
+        stacks = client.get_stacks(include_archived=True)
     except requests.RequestException as e:
         print(f"{C.RED}Error fetching stacks: {e}{C.RESET}", file=sys.stderr)
         sys.exit(1)
 
-    todo_stack = client.find_stack_by_name(stacks, args.todo_name)
-    doing_stack = client.find_stack_by_name(stacks, args.doing_name)
-    done_stack = client.find_stack_by_name(stacks, args.done_name)
+    todo_stack = find_stack_by_name(stacks, args.todo_name)
+    doing_stack = find_stack_by_name(stacks, args.doing_name)
+    done_stack = find_stack_by_name(stacks, args.done_name)
 
     if not todo_stack:
         print(
@@ -147,7 +147,7 @@ def main() -> None:
     # -------- Move --------
     # Refresh stacks to ensure we see the newly created card too
     try:
-        stacks = client.fetch_stacks(include_archived=True)
+        stacks = client.get_stacks(include_archived=True)
     except requests.RequestException as e:
         print(f"{C.RED}Error fetching stacks: {e}{C.RESET}", file=sys.stderr)
         sys.exit(1)
@@ -162,7 +162,7 @@ def main() -> None:
         title = args.todo_move
         target_stack = todo_stack
 
-    found = client.find_card_by_title(stacks, title)
+    found = find_card_by_title(stacks, title)
     if not found:
         print(f"{C.RED}No card found with title: {title}{C.RESET}\n", file=sys.stderr)
         sys.exit(1)

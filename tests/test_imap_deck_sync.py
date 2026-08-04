@@ -975,7 +975,7 @@ class _FakeRunDeck:
         self.archived = []
         self._next_card_id = 5000
 
-    def fetch_stacks(self, include_archived=False):
+    def get_stacks(self, include_archived=False):
         return self._stacks
 
     def get_board_labels(self, board_id=None):
