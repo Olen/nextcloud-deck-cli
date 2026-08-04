@@ -13,10 +13,13 @@ from imap_deck_sync import (
     CreateCardAction,
     AssignLabelAction,
     ArchiveAction,
+    TickDoneAction,
+    MoveToDoneByTickAction,
     StackIds,
     make_plan,
     latest_done_at,
     plan_archive,
+    plan_done_sync,
     fetch_managed,
     fetch_starred,
     fetch_deck_activity,
@@ -437,6 +440,7 @@ class _FakeDeck:
         self.created = []
         self.moved = []
         self.assigned = []
+        self.patched = []
         self.fail_creates = fail_creates
         self.fail_moves_for_card_ids = set(fail_moves_for_card_ids)
         self.fail_assigns_for_label_ids = set(fail_assigns_for_label_ids)
@@ -451,10 +455,10 @@ class _FakeDeck:
         self.created.append({"id": new_id, "stack_id": stack_id, "title": title, "description": description})
         return card
 
-    def move_card(self, card, target_stack_id):
+    def move_card(self, card, target_stack_id, order=0, clear_done=False, board_id=None):
         if card.id in self.fail_moves_for_card_ids:
             raise RuntimeError(f"simulated move failure for card {card.id}")
-        self.moved.append({"card_id": card.id, "target": target_stack_id})
+        self.moved.append({"card_id": card.id, "target": target_stack_id, "order": order})
         card.stack_id = target_stack_id
         return card
 
@@ -462,6 +466,12 @@ class _FakeDeck:
         if label_id in self.fail_assigns_for_label_ids:
             raise RuntimeError(f"simulated label failure for label {label_id}")
         self.assigned.append({"stack_id": stack_id, "card_id": card_id, "label_id": label_id})
+
+    def patch_card(self, card, board_id=None, **changes):
+        for k, v in changes.items():
+            setattr(card, k, v)
+        self.patched.append((card.id, changes))
+        return card
 
 
 class TestExecutePlan:
@@ -508,7 +518,7 @@ class TestExecutePlan:
         plan = [MoveToDoneAction(card=card, target_stack_id=3)]
         summary = execute_plan(plan=plan, mailbox=mailbox, deck=deck, dry_run=False)
         assert summary.moved == 1
-        assert deck.moved == [{"card_id": 42, "target": 3}]
+        assert deck.moved == [{"card_id": 42, "target": 3, "order": 0}]
 
     def test_unstars_message(self):
         from imap_tools import MailMessageFlags  # confirms the dep is present
@@ -973,6 +983,7 @@ class _FakeRunDeck:
         self.moved = []
         self.assigned = []
         self.archived = []
+        self.patched = []
         self._next_card_id = 5000
 
     def get_stacks(self, include_archived=False):
@@ -998,7 +1009,7 @@ class _FakeRunDeck:
         self.created.append({"stack_id": stack_id, "title": title})
         return card
 
-    def move_card(self, card, target_stack_id):
+    def move_card(self, card, target_stack_id, order=0, clear_done=False, board_id=None):
         self.moved.append({"card_id": card.id, "target": target_stack_id})
         card.stack_id = target_stack_id
         return card
@@ -1008,6 +1019,12 @@ class _FakeRunDeck:
 
     def archive_card(self, stack_id, card_id, board_id=None):
         self.archived.append({"stack_id": stack_id, "card_id": card_id})
+
+    def patch_card(self, card, board_id=None, **changes):
+        for k, v in changes.items():
+            setattr(card, k, v)
+        self.patched.append((card.id, changes))
+        return card
 
 
 def _run_config(**overrides):
@@ -1136,3 +1153,105 @@ class TestRunArchiveWiring:
         assert rc == 0
         assert deck.created  # make_plan's CreateCardAction reached execute_plan
         assert deck.archived == [{"stack_id": 9, "card_id": 319}]
+
+
+# --- done-tick <-> Done stack sync pass ---
+
+def make_card(id, title="", stack_id=None, done=None, archived=False,
+             deleted_at=0, labels=()):
+    """Minimal stand-in for ncdeck.Card covering the fields plan_done_sync
+    and execute_plan's tick/move-by-tick branches need."""
+    return SimpleNamespace(
+        id=id, title=title, stack_id=stack_id, done=done,
+        archived=archived, deleted_at=deleted_at, labels=list(labels),
+    )
+
+
+DONE_SYNC_NOW_ISO = "2026-08-04T15:30:00+00:00"
+
+
+class TestPlanDoneSync:
+    def test_ticks_an_unticked_card_in_done(self):
+        card = make_card(id=110, title="Vanne planter", stack_id=9, done=None)
+        actions = plan_done_sync([card], [], done_stack_id=9, now_iso=DONE_SYNC_NOW_ISO)
+        assert actions == [
+            TickDoneAction(card=card, card_title="Vanne planter", done_at=DONE_SYNC_NOW_ISO)
+        ]
+
+    def test_leaves_an_already_ticked_card_in_done_alone(self):
+        card = make_card(id=323, title="Timeliste", stack_id=9,
+                         done="2026-08-03T17:08:04+00:00")
+        assert plan_done_sync([card], [], done_stack_id=9, now_iso=DONE_SYNC_NOW_ISO) == []
+
+    def test_moves_a_ticked_card_out_of_todo_into_done(self):
+        card = make_card(id=1, title="Chore", stack_id=22,
+                         done="2026-08-04T09:00:00+00:00")
+        actions = plan_done_sync([], [card], done_stack_id=9, now_iso=DONE_SYNC_NOW_ISO)
+        assert actions == [
+            MoveToDoneByTickAction(card=card, card_title="Chore", target_stack_id=9)
+        ]
+
+    def test_leaves_an_unticked_card_outside_done_alone(self):
+        card = make_card(id=1, title="Chore", stack_id=22, done=None)
+        assert plan_done_sync([], [card], done_stack_id=9, now_iso=DONE_SYNC_NOW_ISO) == []
+
+    def test_done_sync_skips_archived_cards_in_both_directions(self):
+        in_done = make_card(id=1, title="A", stack_id=9, done=None, archived=True)
+        outside = make_card(id=2, title="B", stack_id=22, done=DONE_SYNC_NOW_ISO, archived=True)
+        assert plan_done_sync([in_done], [outside], done_stack_id=9,
+                              now_iso=DONE_SYNC_NOW_ISO) == []
+
+    def test_done_sync_skips_trashed_cards_in_both_directions(self):
+        in_done = make_card(id=1, title="A", stack_id=9, done=None, deleted_at=17543)
+        outside = make_card(id=2, title="B", stack_id=22, done=DONE_SYNC_NOW_ISO, deleted_at=17543)
+        assert plan_done_sync([in_done], [outside], done_stack_id=9,
+                              now_iso=DONE_SYNC_NOW_ISO) == []
+
+    def test_done_sync_converges_after_one_pass(self):
+        """Applying the plan and re-planning must yield nothing to do."""
+        unticked_in_done = make_card(id=1, title="A", stack_id=9, done=None)
+        ticked_in_todo = make_card(id=2, title="B", stack_id=22, done=DONE_SYNC_NOW_ISO)
+
+        first = plan_done_sync([unticked_in_done], [ticked_in_todo],
+                               done_stack_id=9, now_iso=DONE_SYNC_NOW_ISO)
+        assert len(first) == 2
+
+        # Apply: the Done card gains a tick; the Todo card moves into Done.
+        unticked_in_done.done = DONE_SYNC_NOW_ISO
+        ticked_in_todo.stack_id = 9
+
+        second = plan_done_sync([unticked_in_done, ticked_in_todo], [],
+                                done_stack_id=9, now_iso=DONE_SYNC_NOW_ISO)
+        assert second == []
+
+
+class TestExecuteDoneSyncActions:
+    def test_execute_tick_calls_patch_card_with_the_timestamp(self):
+        card = make_card(id=110, title="Vanne planter", stack_id=9, done=None)
+        deck = _FakeDeck()
+        summary = execute_plan(
+            [TickDoneAction(card=card, card_title="Vanne planter", done_at=DONE_SYNC_NOW_ISO)],
+            mailbox=_FakeMailbox(), deck=deck,
+        )
+        assert deck.patched == [(110, {"done": DONE_SYNC_NOW_ISO})]
+        assert summary.ticked == 1
+
+    def test_execute_move_by_tick_calls_move_card_at_order_zero(self):
+        card = make_card(id=1, title="Chore", stack_id=22, done=DONE_SYNC_NOW_ISO)
+        deck = _FakeDeck()
+        summary = execute_plan(
+            [MoveToDoneByTickAction(card=card, card_title="Chore", target_stack_id=9)],
+            mailbox=_FakeMailbox(), deck=deck,
+        )
+        assert deck.moved == [{"card_id": 1, "target": 9, "order": 0}]
+        assert summary.moved_by_tick == 1
+
+    def test_execute_done_sync_actions_do_nothing_under_dry_run(self):
+        card = make_card(id=110, title="Vanne planter", stack_id=9, done=None)
+        deck = _FakeDeck()
+        summary = execute_plan(
+            [TickDoneAction(card=card, card_title="Vanne planter", done_at=DONE_SYNC_NOW_ISO)],
+            mailbox=_FakeMailbox(), deck=deck, dry_run=True,
+        )
+        assert deck.patched == []
+        assert summary.ticked == 1

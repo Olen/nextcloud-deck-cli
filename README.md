@@ -96,6 +96,24 @@ against — size the threshold against your own instance's setting. Values of
 pass. Cards with no move-to-Done record in the activity window are left
 alone.
 
+### done-tick sync
+
+Deck's per-card done-tick and membership of the `Done` stack are kept in
+agreement on every run:
+
+- a card in `Done` with no done-tick gets one
+- a card in `Todo` or `Doing` with a done-tick is moved into `Done`
+
+Stack membership wins inside `Done`; the tick wins outside it. That is
+loop-free — after one pass every card is either in `Done` and ticked, or
+outside `Done` and unticked.
+
+The consequence is that un-ticking a card while leaving it in `Done` does not
+stick: the next run re-ticks it. To reopen a card, drag it out of `Done`.
+
+Archived and trashed cards are left alone. Disable the pass with
+`--no-done-sync` or `DONE_SYNC=0`.
+
 Use `--dry-run` to see the full plan without making any IMAP or Deck changes
 — the safe way to try it out.
 
@@ -120,7 +138,7 @@ usage: nextcloud-deck-imap-sync.py [-h] [--url URL] [-u USERNAME]
                                    [--imap-password IMAP_PASSWORD]
                                    [--imap-folder IMAP_FOLDER]
                                    [--archive-done-after-days ARCHIVE_DONE_AFTER_DAYS]
-                                   [--dry-run] [-v]
+                                   [--dry-run] [--no-done-sync] [-v]
 
 Sync IMAP starred messages to/from a Nextcloud Deck Todo board.
 
@@ -147,6 +165,7 @@ options:
                         Archive Email-labelled cards that have been in Done
                         this many days. 0 or less disables the pass.
   --dry-run             Plan everything; perform no IMAP or Deck mutations.
+  --no-done-sync        Disable the done-tick <-> Done stack sync pass.
   -v, --verbose
 ```
 

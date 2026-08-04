@@ -60,6 +60,10 @@ def main() -> int:
     # Modes
     p.add_argument("--dry-run", action="store_true",
                    help="Plan everything; perform no IMAP or Deck mutations.")
+    p.add_argument("--no-done-sync", action="store_false", dest="done_sync",
+                   default=env("DONE_SYNC", "1").lower()
+                   not in ("0", "false", "no", "off"),
+                   help="Disable the done-tick <-> Done stack sync pass.")
     p.add_argument("-v", "--verbose", action="store_true")
 
     args = p.parse_args()
@@ -117,6 +121,7 @@ def main() -> int:
         imap_password=args.imap_password,
         imap_folder=args.imap_folder,
         archive_done_after_days=args.archive_done_after_days,
+        done_sync=args.done_sync,
         dry_run=args.dry_run,
         verbose=args.verbose,
     )

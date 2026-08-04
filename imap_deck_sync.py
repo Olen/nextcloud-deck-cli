@@ -137,9 +137,26 @@ class ArchiveAction:
     done_at: int
 
 
+@dataclass(frozen=True)
+class TickDoneAction:
+    """Set Deck's done-tick on a card that is sitting in the Done stack."""
+    card: Any           # ncdeck.Card
+    card_title: str
+    done_at: str        # ISO 8601 with offset, e.g. 2026-08-04T15:30:00+00:00
+
+
+@dataclass(frozen=True)
+class MoveToDoneByTickAction:
+    """Move a card into Done because its done-tick was set by hand."""
+    card: Any           # ncdeck.Card
+    card_title: str
+    target_stack_id: int
+
+
 Action = (
     UnstarAction | MoveToDoneAction | CreateCardAction
     | AssignLabelAction | ArchiveAction
+    | TickDoneAction | MoveToDoneByTickAction
 )
 
 log = logging.getLogger(__name__)
@@ -321,6 +338,56 @@ def plan_archive(done_cards, done_at: dict[int, int], email_label_id: int,
     return actions
 
 
+def plan_done_sync(done_cards, open_cards, done_stack_id: int,
+                   now_iso: str) -> list:
+    """
+    Pure planner keeping Deck's per-card `done` field and membership of the
+    Done stack in agreement.
+
+    Stack membership wins inside Done; the tick wins outside it:
+      - a card in Done with no `done` value is ticked
+      - a card in Todo or Doing with a `done` value is moved into Done
+
+    This cannot oscillate. After one pass every card is either in Done and
+    ticked, or outside Done and unticked, and neither clause then matches.
+
+    The cost is that un-ticking a card while leaving it in Done is not
+    expressible: the next run re-ticks it. Un-ticking means dragging the card
+    out of Done.
+
+    Archived and trashed cards are skipped in both directions. Deck's update
+    endpoint hardcodes `deletedAt` to 0, so touching a trashed card would
+    restore it from the trash.
+    """
+    actions: list = []
+
+    for card in done_cards or []:
+        if getattr(card, "archived", False) or getattr(card, "deleted_at", 0):
+            continue
+        if getattr(card, "done", None) is None:
+            actions.append(
+                TickDoneAction(
+                    card=card,
+                    card_title=getattr(card, "title", "") or "",
+                    done_at=now_iso,
+                )
+            )
+
+    for card in open_cards or []:
+        if getattr(card, "archived", False) or getattr(card, "deleted_at", 0):
+            continue
+        if getattr(card, "done", None) is not None:
+            actions.append(
+                MoveToDoneByTickAction(
+                    card=card,
+                    card_title=getattr(card, "title", "") or "",
+                    target_stack_id=done_stack_id,
+                )
+            )
+
+    return actions
+
+
 def _flagged_flag():
     # Import inside the function so this module stays importable without imap_tools
     # (e.g. in environments that only run the pure-logic tests).
@@ -336,6 +403,8 @@ class ExecutionSummary:
     unstarred: int = 0
     labels_assigned: int = 0
     archived: int = 0
+    ticked: int = 0
+    moved_by_tick: int = 0
     failures: int = 0
 
 
@@ -355,7 +424,8 @@ def execute_plan(plan, mailbox, deck, dry_run: bool = False) -> ExecutionSummary
     `mailbox` must duck-type as imap_tools.MailBox (we call
     `.flag(uids, {FLAGGED}, False)`).
     `deck` must duck-type as ncdeck.DeckClient (we call `.create_card(...)`,
-    `.move_card(...)`, `.assign_label(...)`, and `.archive_card(...)`).
+    `.move_card(...)`, `.assign_label(...)`, `.archive_card(...)`, and
+    `.patch_card(...)`).
     """
     summary = ExecutionSummary()
 
@@ -435,6 +505,26 @@ def execute_plan(plan, mailbox, deck, dry_run: bool = False) -> ExecutionSummary
                              action.card_id, action.card_title, action.done_at)
                     deck.archive_card(stack_id=action.stack_id, card_id=action.card_id)
                 summary.archived += 1
+
+            elif isinstance(action, TickDoneAction):
+                if dry_run:
+                    log.info("[dry-run] would tick card #%s %r as done at %s",
+                             action.card.id, action.card_title, action.done_at)
+                else:
+                    log.info("Ticking card #%s %r as done at %s",
+                             action.card.id, action.card_title, action.done_at)
+                    deck.patch_card(action.card, done=action.done_at)
+                summary.ticked += 1
+
+            elif isinstance(action, MoveToDoneByTickAction):
+                if dry_run:
+                    log.info("[dry-run] would move ticked card #%s %r to stack #%s",
+                             action.card.id, action.card_title, action.target_stack_id)
+                else:
+                    log.info("Moving ticked card #%s %r to stack #%s",
+                             action.card.id, action.card_title, action.target_stack_id)
+                    deck.move_card(action.card, action.target_stack_id, order=0)
+                summary.moved_by_tick += 1
 
             else:
                 log.warning("Unknown action type %r — skipping", type(action).__name__)
@@ -573,6 +663,7 @@ class Config:
     imap_password: str
     imap_folder: str
     archive_done_after_days: int = 7
+    done_sync: bool = True
     dry_run: bool = False
     verbose: bool = False
 
@@ -656,6 +747,24 @@ def run(config: Config) -> int:
     managed = fetch_managed(stacks)
     log.info("Found %d managed card(s) on board %s", len(managed), config.nc_board_id)
 
+    done_sync_actions: list = []
+    if config.done_sync:
+        open_cards = (
+            (getattr(todo, "cards", None) or [])
+            + (getattr(doing, "cards", None) or [])
+        )
+        done_sync_actions = plan_done_sync(
+            done_cards=getattr(done, "cards", None) or [],
+            open_cards=open_cards,
+            done_stack_id=done.id,
+            now_iso=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        )
+        ticks = sum(1 for a in done_sync_actions if isinstance(a, TickDoneAction))
+        log.info(
+            "Done-tick pass: %d card(s) in %s to tick, %d ticked card(s) to move in",
+            ticks, config.done_stack_name, len(done_sync_actions) - ticks,
+        )
+
     archive_actions: list[ArchiveAction] = []
     activity_failures = 0
     if config.archive_done_after_days > 0:
@@ -693,7 +802,7 @@ def run(config: Config) -> int:
                 managed=managed,
                 stack_ids=stack_ids,
                 email_label_id=email_label.id,
-            ) + archive_actions
+            ) + done_sync_actions + archive_actions
             log.info("Plan: %d action(s)%s",
                      len(plan), " (dry-run)" if config.dry_run else "")
 
@@ -708,9 +817,10 @@ def run(config: Config) -> int:
 
     log.info(
         "Done: created=%d moved=%d unstarred=%d labels_assigned=%d "
-        "archived=%d failures=%d%s",
+        "archived=%d ticked=%d moved_by_tick=%d failures=%d%s",
         summary.created, summary.moved, summary.unstarred,
-        summary.labels_assigned, summary.archived, summary.failures,
+        summary.labels_assigned, summary.archived, summary.ticked,
+        summary.moved_by_tick, summary.failures,
         " (dry-run)" if config.dry_run else "",
     )
     return 0 if summary.failures == 0 else 2
