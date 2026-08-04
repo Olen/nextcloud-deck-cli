@@ -597,7 +597,7 @@ class _FakeDeckLabels:
     def get_board_labels(self, board_id=None):
         return self.existing_labels
 
-    def create_label(self, board_id=None, title="", color="808080"):
+    def create_label(self, title="", color="808080", board_id=None):
         self.create_calls.append({"board_id": board_id, "title": title, "color": color})
         return self.create_returns
 
@@ -981,7 +981,7 @@ class _FakeRunDeck:
     def get_board_labels(self, board_id=None):
         return [self._email_label]
 
-    def create_label(self, board_id=None, title="", color="808080"):
+    def create_label(self, title="", color="808080", board_id=None):
         raise AssertionError("create_label should not be needed; label already exists")
 
     def get_deck_activity(self, limit=200, since=None):
