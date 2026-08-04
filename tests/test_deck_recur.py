@@ -309,6 +309,26 @@ def test_a_card_matching_two_labels_yields_one_action():
     assert set(actions[0].label_titles) == {"Repeat: 25", "Repeat: daily"}
 
 
+def test_a_label_absent_from_schedules_does_not_make_a_card_fire():
+    # `broken` is the id of a label that failed to parse: parse_labels would
+    # have put it in `problems` and left it out of `schedules` entirely. A
+    # card carrying only that label, alongside a card that also carries a
+    # genuinely due label, must not be mistaken for a due card - the guard
+    # is `schedules.get(label_id) is not None`, not "label present at all".
+    valid = FakeLabel(146, "Repeat: 25")
+    broken = FakeLabel(9, "Repeat: modnay")
+    mixed_card = FakeCard(1, "Chore", [valid, broken])
+    broken_only_card = FakeCard(2, "OnlyBroken", [broken])
+
+    actions = plan_recurrence(
+        [mixed_card, broken_only_card], {146: DUE}, THE_25TH, 22
+    )
+
+    assert len(actions) == 1
+    assert actions[0].card is mixed_card
+    assert actions[0].label_titles == ("Repeat: 25",)
+
+
 # --- execute_plan ---------------------------------------------------------
 
 def test_execute_moves_with_order_zero_and_clears_done():
@@ -418,6 +438,30 @@ def test_run_warns_about_an_unparseable_label_and_names_the_cards(caplog):
     )
     with caplog.at_level("WARNING"):
         run(base_config(on_date=THE_25TH), deck=deck)
+    text = caplog.text
+    assert "Repeat: modnay" in text
+    assert "Chore" in text
+
+
+def test_run_moves_the_valid_card_skips_the_broken_labeled_one_and_still_warns(caplog):
+    # Proves warnings and planning coexist: one parseable and one broken
+    # `Repeat:` label on the board, one card carrying each. The valid card
+    # must move, the broken-label card must not, the run must still exit 0,
+    # and the warning must still name the broken label and its card - none
+    # of that may short-circuit the other.
+    valid_card = FakeCard(323, "Timeliste", [FakeLabel(146, "Repeat: 25")])
+    broken_card = FakeCard(1, "Chore", [FakeLabel(9, "Repeat: modnay")])
+    deck = FakeDeck(
+        board_labels=[FakeLabel(146, "Repeat: 25"), FakeLabel(9, "Repeat: modnay")],
+        stacks=[
+            FakeStack(22, "Todo", []),
+            FakeStack(9, "Done", [valid_card, broken_card]),
+        ],
+    )
+    with caplog.at_level("WARNING"):
+        rc = run(base_config(on_date=THE_25TH), deck=deck)
+    assert rc == 0
+    assert deck.moves == [(323, 22, 0, True)]
     text = caplog.text
     assert "Repeat: modnay" in text
     assert "Chore" in text
