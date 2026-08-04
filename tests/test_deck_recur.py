@@ -130,6 +130,32 @@ def test_day_29_does_not_fire_on_28_february_in_a_leap_year():
     assert not fires_on(sched, date(2028, 2, 28))
 
 
+def test_day_30_clamps_to_end_of_february():
+    sched = Schedule(kind="dayofmonth", day=30)
+    assert fires_on(sched, date(2026, 2, 28))
+    assert not fires_on(sched, date(2026, 2, 27))
+
+
+def test_day_30_clamps_to_29_february_in_a_leap_year():
+    sched = Schedule(kind="dayofmonth", day=30)
+    assert fires_on(sched, date(2028, 2, 29))
+    assert not fires_on(sched, date(2028, 2, 28))
+
+
+def test_day_30_does_not_clamp_in_april():
+    # April has exactly 30 days, so no clamping occurs.
+    sched = Schedule(kind="dayofmonth", day=30)
+    assert fires_on(sched, date(2026, 4, 30))
+    assert not fires_on(sched, date(2026, 4, 29))
+
+
+def test_day_30_does_not_clamp_in_a_31_day_month():
+    # August has 31 days, and the requested day is 30, so no clamping.
+    sched = Schedule(kind="dayofmonth", day=30)
+    assert fires_on(sched, date(2026, 8, 30))
+    assert not fires_on(sched, date(2026, 8, 31))
+
+
 # --- parse_labels ---------------------------------------------------------
 
 def test_parse_labels_picks_up_prefixed_labels():
