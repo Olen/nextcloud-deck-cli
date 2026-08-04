@@ -2524,3 +2524,188 @@ Report: the two dry-run outputs, the `ticked=` counts from the first and second 
 - The 5-minute `imap-deck-sync.timer` runs throughout this work. Between Task 8 landing and Task 10 completing, the deployed code and the installed library must stay compatible — this is why Task 4 (release) precedes Task 10 (pin), and why Task 10 Step 1 is a hard gate.
 - `tests/conftest.py` puts the repo root on `sys.path`, so tests import `deck_recur` and `imap_deck_sync` directly with no install step.
 - `imap_deck_sync.py` imports `imap_tools` lazily inside functions so the pure-logic tests run without it. Keep that property: do not add a module-level `imap_tools` import.
+
+---
+
+### Task 12: Rename imap-deck-sync to deck-sync
+
+With the done-tick pass added, two of the module's three passes are Deck-internal and the `imap` in its name misleads. This task is a **pure rename: no behaviour changes at all.** Keeping it separate and last means every feature diff above stays free of churn, and this one is trivial to review or revert.
+
+**Files:**
+
+| From | To |
+|---|---|
+| `imap_deck_sync.py` | `deck_sync.py` |
+| `nextcloud-deck-imap-sync.py` | `nextcloud-deck-sync.py` |
+| `imap-deck-sync-wrapper.sh` | `deck-sync-wrapper.sh` |
+| `tests/test_imap_deck_sync.py` | `tests/test_deck_sync.py` |
+| chezmoi `dot_config/systemd/user/imap-deck-sync.service` | `deck-sync.service` |
+| chezmoi `dot_config/systemd/user/imap-deck-sync.timer` | `deck-sync.timer` |
+
+Also modified: `README.md`, and the olen logger app name and Discord strings inside the entrypoint.
+
+**Interfaces:**
+- Consumes: everything above, verified working in Task 11.
+- Produces: no API change. `deck_recur.py` is untouched — it never imported the sync module. `deck_sync.py` keeps its `from deck_recur import DEFAULT_LABEL_PREFIX` import from Task 9.
+
+- [ ] **Step 1: Find every reference before moving anything**
+
+```bash
+cd ~/prog/nextcloud-deck-cli
+grep -rn "imap_deck_sync\|imap-deck-sync" \
+    --include='*.py' --include='*.sh' --include='*.md' --include='*.txt' \
+    . | grep -v '^./docs/superpowers/' | grep -v '^./.git/'
+grep -rn "imap-deck-sync" ~/.local/share/chezmoi/dot_config/ ~/.config/systemd/user/ 2>/dev/null
+```
+
+Record the full list in your report. Files under `docs/superpowers/` are historical spec and plan records — **leave those unchanged**, they describe what was true when written. Everything else must be updated.
+
+- [ ] **Step 2: Stop the old timer first**
+
+The unit must be disabled before its `ExecStart` target disappears, or the next tick fires `notify-failure@imap-deck-sync.service` at you.
+
+```bash
+systemctl --user disable --now imap-deck-sync.timer
+systemctl --user list-timers imap-deck-sync.timer --all
+```
+
+Expected: the timer is gone from the list. The sync is now stopped; the rest of this task should follow promptly.
+
+- [ ] **Step 3: Move the repo files**
+
+```bash
+cd ~/prog/nextcloud-deck-cli
+git mv imap_deck_sync.py deck_sync.py
+git mv nextcloud-deck-imap-sync.py nextcloud-deck-sync.py
+git mv imap-deck-sync-wrapper.sh deck-sync-wrapper.sh
+git mv tests/test_imap_deck_sync.py tests/test_deck_sync.py
+```
+
+- [ ] **Step 4: Update the imports and strings**
+
+In `nextcloud-deck-sync.py`:
+
+```python
+from deck_sync import Config, run, validate_archive_days  # noqa: E402
+```
+
+and change the olen app name from `"imap-deck-sync"` to `"deck-sync"`:
+
+```python
+    APP_CONFIG.set(ATTR_APP, "name", "deck-sync")
+```
+
+In the same file, update the two Discord blocks — titles `imap-deck-sync completed with per-card failures` and `imap-deck-sync failed` become `deck-sync ...`, the `app=` keyword becomes `"deck-sync"`, and the log path in both messages becomes `~/bin/logs/deck-sync.log`.
+
+In `tests/test_deck_sync.py`, change every `from imap_deck_sync import ...` and `import imap_deck_sync` to `deck_sync`.
+
+In `deck-sync-wrapper.sh`, change the `exec` line to:
+
+```bash
+exec /home/olen/prog/nextcloud-deck-cli/nextcloud-deck-sync.py \
+```
+
+- [ ] **Step 5: Verify nothing still refers to the old names**
+
+```bash
+cd ~/prog/nextcloud-deck-cli
+grep -rn "imap_deck_sync\|imap-deck-sync" \
+    --include='*.py' --include='*.sh' --include='*.txt' . | grep -v '^./.git/'
+```
+
+Expected: no output. (`.md` is excluded here only because `README.md` is handled in Step 7; if you have already done Step 7, add `--include='*.md'` and expect no output outside `docs/superpowers/`.)
+
+- [ ] **Step 6: Run the whole suite**
+
+Run: `cd ~/prog/nextcloud-deck-cli && python -m pytest tests/ -v`
+Expected: PASS, exactly the same test count as at the end of Task 11. A rename that changes the number of passing tests is not a rename.
+
+- [ ] **Step 7: Update the README heading**
+
+Change the section heading `# nextcloud-deck-imap-sync` to `# nextcloud-deck-sync`, and update any prose or usage block in that section that names the old script, wrapper, or unit. The `# nextcloud-deck-recur` section added in Task 7 needs no change.
+
+- [ ] **Step 8: Verify the CLI still runs**
+
+```bash
+cd ~/prog/nextcloud-deck-cli
+./nextcloud-deck-sync.py --help >/dev/null && echo "cli ok"
+./deck-sync-wrapper.sh --dry-run 2>&1 | tail -5
+```
+
+Expected: `cli ok`, and the wrapper completes a full dry-run with a `Done:` summary line and exit 0.
+
+- [ ] **Step 9: Commit the repo rename**
+
+```bash
+cd ~/prog/nextcloud-deck-cli
+git add -A
+git commit -m "refactor: rename imap-deck-sync to deck-sync
+
+Two of the module's three passes are now Deck-internal -- the archive pass
+and the done-tick sync -- so the imap in the name misleads. Pure rename:
+no behaviour change.
+
+Historical specs and plans under docs/superpowers keep the old name, since
+they describe what was true when they were written.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+- [ ] **Step 10: Rename the chezmoi units**
+
+```bash
+cd ~/.local/share/chezmoi
+git mv dot_config/systemd/user/imap-deck-sync.service dot_config/systemd/user/deck-sync.service
+git mv dot_config/systemd/user/imap-deck-sync.timer dot_config/systemd/user/deck-sync.timer
+```
+
+Then edit the two files. In `deck-sync.service`, the `Description` becomes `Sync IMAP starred messages, done-ticks and archiving on a Nextcloud Deck board` and the `ExecStart` becomes:
+
+```
+ExecStart=%h/prog/nextcloud-deck-cli/deck-sync-wrapper.sh
+```
+
+In `deck-sync.timer`, the `Description` becomes `Run deck-sync every 5 minutes`. Every other line in both files, including the chezmoi header, stays exactly as it is.
+
+- [ ] **Step 11: Apply, remove the stale targets, and enable**
+
+`chezmoi apply` writes the new units but does **not** delete the old deployed ones — they are no longer in the source, so chezmoi simply stops managing them. They must be removed by hand or systemd will keep offering a unit whose `ExecStart` no longer exists.
+
+```bash
+chezmoi diff
+chezmoi apply
+rm -f ~/.config/systemd/user/imap-deck-sync.service ~/.config/systemd/user/imap-deck-sync.timer
+systemctl --user daemon-reload
+systemctl --user enable --now deck-sync.timer
+systemctl --user list-timers deck-sync.timer --all
+```
+
+Expected: `chezmoi diff` shows only the two unit files; the timer is listed with a NEXT time within 5 minutes.
+
+- [ ] **Step 12: Watch a real run complete**
+
+```bash
+systemctl --user start deck-sync.service
+journalctl --user -u deck-sync.service --since "2 min ago" --no-pager | tail -20
+```
+
+Expected: a `Done:` summary line with `failures=0`. Confirm `~/bin/logs/deck-sync.log` now exists.
+
+- [ ] **Step 13: Commit the chezmoi source**
+
+```bash
+cd ~/.local/share/chezmoi
+git add dot_config/systemd/user/deck-sync.service dot_config/systemd/user/deck-sync.timer \
+        dot_config/systemd/user/imap-deck-sync.service dot_config/systemd/user/imap-deck-sync.timer
+git commit -m "refactor(systemd): rename imap-deck-sync units to deck-sync
+
+The service now runs three passes, only one of which is an IMAP sync.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+If the chezmoi repo has other uncommitted changes, commit only these paths.
+
+- [ ] **Step 14: Report**
+
+Report: the reference list from Step 1, the test count before and after, and confirmation that `deck-sync.timer` is enabled and has completed a run with `failures=0`.
