@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from dateutil import parser as dateparser  # built-in on most distros
 from typing import List, Optional
 
-from ncdeck import DeckClient, Stack, Card, Label
+from ncdeck import DeckClient, Stack, Card, Label, to_dict
 """
 List Nextcloud Deck cards from a board, grouped by lists (stacks).
 
@@ -322,7 +322,7 @@ def main() -> None:
     client = DeckClient(args.url, args.username, args.password, args.board_id)
 
     try:
-        stacks = client.fetch_stacks(include_archived=args.include_archived)
+        stacks = client.get_stacks(include_archived=args.include_archived)
     except requests.RequestException as e:
         print(f"Error fetching stacks: {e}", file=sys.stderr)
         sys.exit(1)
@@ -342,7 +342,7 @@ def main() -> None:
                     "title": s.title,
                     "order": s.order,
                 },
-                "cards": [client.to_dict(c) for c in s.cards],
+                "cards": [to_dict(c) for c in s.cards],
             }
             for s in stacks
         ]

@@ -619,7 +619,7 @@ def run(config: Config) -> int:
     )
 
     try:
-        stacks = deck.fetch_stacks(include_archived=False)
+        stacks = deck.get_stacks(include_archived=False)
     except Exception as e:
         log.error("Failed to fetch Deck stacks: %s", e)
         return 1
