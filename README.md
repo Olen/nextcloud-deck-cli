@@ -149,3 +149,64 @@ options:
   --dry-run             Plan everything; perform no IMAP or Deck mutations.
   -v, --verbose
 ```
+
+# nextcloud-deck-recur
+
+Returns recurring cards from `Done` to `Todo` on the days their label names.
+
+A recurrence label is any Deck label whose title starts with `Repeat:`. The
+rest of the title is the schedule. Create the labels you need by hand in the
+Deck UI; this script only reads them.
+
+| Label title | Fires on |
+|---|---|
+| `Repeat: daily` | every day |
+| `Repeat: mon` | every Monday |
+| `Repeat: mon,thu` | every Monday and Thursday |
+| `Repeat: 1` | the 1st of each month |
+| `Repeat: 25` | the 25th of each month |
+
+- Weekday names are `mon tue wed thu fri sat sun`, comma-separated.
+- Day-of-month clamps to the end of short months, so `Repeat: 31` fires on
+  28 February and on 30 April.
+- The prefix and expression are matched case-insensitively.
+- Several recurrence labels on one card union together.
+- An unparseable expression is logged as a WARNING naming the label and the
+  cards carrying it, and those cards are skipped, so a typo is visible rather
+  than silently disabling a chore.
+- Interval schedules (`Repeat: 14d`) are **not implemented**. The parser
+  recognises the form and says so explicitly.
+
+When a card is returned to `Todo` its Deck done-tick is cleared, so it
+arrives as an open task.
+
+There is no state file. The move out of `Done` is itself the record that the
+card has recurred, which is why this must run **once a day** — at a shorter
+interval, re-completing a card on its own trigger day would send it straight
+back. Deployed as `deck-recur.timer`, daily at 04:15.
+
+If the host is down for a whole trigger day, those cards wait for the next
+occurrence. Replay a missed day with `--date`.
+
+## Usage:
+
+```
+nextcloud-deck-recur.py --url URL -u USER -p PASS -b BOARD_ID
+                        [--source-name Done] [--target-name Todo]
+                        [--label-prefix "Repeat:"]
+                        [--date YYYY-MM-DD] [--dry-run] [-v]
+```
+
+Every flag also reads a matching environment variable: `NEXTCLOUD_BASE_URL`,
+`NEXTCLOUD_USERNAME`, `NEXTCLOUD_PASSWORD`, `NEXTCLOUD_BOARD_ID`,
+`DONE_STACK_NAME`, `TODO_STACK_NAME`, `RECUR_LABEL_PREFIX`, `RECUR_DATE`.
+
+`--date` evaluates a date other than today, for testing a schedule without
+waiting for it and for replaying a missed day:
+
+```bash
+./deck-recur-wrapper.sh --date 2026-08-25 --dry-run -v
+```
+
+Exit codes: `0` clean, `1` setup or connection failure, `2` completed with
+per-card failures.
