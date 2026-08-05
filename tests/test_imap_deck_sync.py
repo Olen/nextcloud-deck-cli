@@ -458,7 +458,10 @@ class _FakeDeck:
     def move_card(self, card, target_stack_id, order=0, clear_done=False, board_id=None):
         if card.id in self.fail_moves_for_card_ids:
             raise RuntimeError(f"simulated move failure for card {card.id}")
-        self.moved.append({"card_id": card.id, "target": target_stack_id, "order": order})
+        self.moved.append({
+            "card_id": card.id, "target": target_stack_id,
+            "order": order, "clear_done": clear_done,
+        })
         card.stack_id = target_stack_id
         return card
 
@@ -518,7 +521,7 @@ class TestExecutePlan:
         plan = [MoveToDoneAction(card=card, target_stack_id=3)]
         summary = execute_plan(plan=plan, mailbox=mailbox, deck=deck, dry_run=False)
         assert summary.moved == 1
-        assert deck.moved == [{"card_id": 42, "target": 3, "order": 0}]
+        assert deck.moved == [{"card_id": 42, "target": 3, "order": 0, "clear_done": False}]
 
     def test_unstars_message(self):
         from imap_tools import MailMessageFlags  # confirms the dep is present
@@ -1010,7 +1013,10 @@ class _FakeRunDeck:
         return card
 
     def move_card(self, card, target_stack_id, order=0, clear_done=False, board_id=None):
-        self.moved.append({"card_id": card.id, "target": target_stack_id})
+        self.moved.append({
+            "card_id": card.id, "target": target_stack_id,
+            "order": order, "clear_done": clear_done,
+        })
         card.stack_id = target_stack_id
         return card
 
@@ -1243,8 +1249,26 @@ class TestExecuteDoneSyncActions:
             [MoveToDoneByTickAction(card=card, card_title="Chore", target_stack_id=9)],
             mailbox=_FakeMailbox(), deck=deck,
         )
-        assert deck.moved == [{"card_id": 1, "target": 9, "order": 0}]
+        assert deck.moved == [
+            {"card_id": 1, "target": 9, "order": 0, "clear_done": False}
+        ]
         assert summary.moved_by_tick == 1
+
+    def test_move_by_tick_never_clears_the_tick_that_caused_the_move(self):
+        # clear_done must stay False here: if it ever flipped to True, the
+        # move would erase the tick that triggered it, the card would land in
+        # Done unticked, plan_done_sync's Done-side clause would re-tick it
+        # next run, and the tick/move pair would repeat forever on the
+        # 5-minute timer. (The recurrence feature intentionally passes
+        # clear_done=True elsewhere — deck_recur.py — and is covered there;
+        # this sync must never do that.)
+        card = make_card(id=1, title="Chore", stack_id=22, done=DONE_SYNC_NOW_ISO)
+        deck = _FakeDeck()
+        execute_plan(
+            [MoveToDoneByTickAction(card=card, card_title="Chore", target_stack_id=9)],
+            mailbox=_FakeMailbox(), deck=deck,
+        )
+        assert deck.moved[0]["clear_done"] is False
 
     def test_execute_done_sync_actions_do_nothing_under_dry_run(self):
         card = make_card(id=110, title="Vanne planter", stack_id=9, done=None)
