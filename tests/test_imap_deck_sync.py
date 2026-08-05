@@ -271,13 +271,7 @@ class TestMakePlan:
 
 class _FakeLabel:
     """Minimal stand-in for ncdeck.Label."""
-    def __init__(self, id):
-        self.id = id
-
-
-class FakeLabel:
-    """Stand-in for ncdeck.Label with id and title."""
-    def __init__(self, id, title):
+    def __init__(self, id, title=""):
         self.id = id
         self.title = title
 
@@ -824,7 +818,7 @@ class TestPlanArchive:
         now = old + 30 * 86400
         card = make_card(
             id=1, title="Monthly report", stack_id=9,
-            labels=[FakeLabel(145, "Email"), FakeLabel(146, "Repeat: 25")],
+            labels=[_FakeLabel(145, "Email"), _FakeLabel(146, "Repeat: 25")],
         )
         actions = plan_archive(
             done_cards=[card], done_at={1: old}, email_label_id=145,
@@ -836,7 +830,7 @@ class TestPlanArchive:
         old = 1_700_000_000
         now = old + 30 * 86400
         card = make_card(id=2, title="Plain email", stack_id=9,
-                         labels=[FakeLabel(145, "Email")])
+                         labels=[_FakeLabel(145, "Email")])
         actions = plan_archive(
             done_cards=[card], done_at={2: old}, email_label_id=145,
             now=now, max_age_days=7,
@@ -848,7 +842,7 @@ class TestPlanArchive:
         old = 1_700_000_000
         now = old + 30 * 86400
         card = make_card(id=3, title="Odd casing", stack_id=9,
-                         labels=[FakeLabel(145, "Email"), FakeLabel(9, "repeat: mon")])
+                         labels=[_FakeLabel(145, "Email"), _FakeLabel(9, "repeat: mon")])
         assert plan_archive(
             done_cards=[card], done_at={3: old}, email_label_id=145,
             now=now, max_age_days=7,
