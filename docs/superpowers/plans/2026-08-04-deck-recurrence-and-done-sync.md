@@ -2410,15 +2410,34 @@ WantedBy=timers.target
 EOF
 ```
 
-- [ ] **Step 5: Preview what chezmoi will change, then apply**
+- [ ] **Step 5: Drop olen_deck from the system-package script, then apply**
+
+`chezmoi apply` on this machine has ~43 pending paths beyond these two units — `/etc` systemd drop-ins, nftables, SELinux modules, and ten chezmoiscripts. **The human partner reviewed that list and chose a full apply**, so do not stop on it. One thing must be fixed first.
+
+`.chezmoiscripts/run_before_00_upgrade-private-tools.sh.tmpl` contains:
 
 ```bash
-chezmoi diff
+PACKAGES="olen nft-viewer olen_deck"
+```
+
+`olen_deck` is the decommissioned private package that the public `nextcloud-deck-client` replaced. Applying as-is would reinstall it system-wide. Remove just that one name:
+
+```bash
+PACKAGES="olen nft-viewer"
+```
+
+Do **not** add `nextcloud-deck-client` to that list. It is installed `--user` and working; adding it would put a second copy system-wide and shadow the one in use. The script's uninstall loop only touches names in `PACKAGES`, so removing `olen_deck` leaves the installed `ncdeck` alone.
+
+Passwordless sudo is available, so the scripts that push to `/etc` and `/usr` will not prompt.
+
+```bash
+cd ~/.local/share/chezmoi
+chezmoi diff --no-pager | grep '^diff --git'   # record this list in your report
 chezmoi apply
 systemctl --user daemon-reload
 ```
 
-Expected: the diff shows only the two new unit files. If it shows unrelated pending changes, report them and stop rather than applying someone else's half-finished work.
+If `chezmoi apply` fails partway, stop and report — do not re-run it or work around the failure.
 
 - [ ] **Step 6: Enable and start the timer**
 
@@ -2659,11 +2678,16 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 10: Rename the chezmoi units**
 
+`dot_config/systemd/user/imap-deck-sync.service` and `.timer` are **untracked** in the chezmoi source repo — deployed but never committed. `git mv` fails on an untracked path, so stage them first:
+
 ```bash
 cd ~/.local/share/chezmoi
+git add dot_config/systemd/user/imap-deck-sync.service dot_config/systemd/user/imap-deck-sync.timer
 git mv dot_config/systemd/user/imap-deck-sync.service dot_config/systemd/user/deck-sync.service
 git mv dot_config/systemd/user/imap-deck-sync.timer dot_config/systemd/user/deck-sync.timer
 ```
+
+If `git status` shows them already tracked by then, skip the `git add`.
 
 Then edit the two files. In `deck-sync.service`, the `Description` becomes `Sync IMAP starred messages, done-ticks and archiving on a Nextcloud Deck board` and the `ExecStart` becomes:
 
