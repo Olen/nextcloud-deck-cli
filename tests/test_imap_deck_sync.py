@@ -275,6 +275,13 @@ class _FakeLabel:
         self.id = id
 
 
+class FakeLabel:
+    """Stand-in for ncdeck.Label with id and title."""
+    def __init__(self, id, title):
+        self.id = id
+        self.title = title
+
+
 class _FakeCard:
     """Minimal stand-in for ncdeck.Card."""
     def __init__(self, id, description="", stack_id=None, labels=None):
@@ -811,6 +818,41 @@ class TestPlanArchive:
 
     def test_empty_inputs(self):
         assert plan_archive([], {}, email_label_id=145, now=NOW, max_age_days=7) == []
+
+    def test_archive_skips_cards_carrying_a_recurrence_label(self):
+        old = 1_700_000_000
+        now = old + 30 * 86400
+        card = make_card(
+            id=1, title="Monthly report", stack_id=9,
+            labels=[FakeLabel(145, "Email"), FakeLabel(146, "Repeat: 25")],
+        )
+        actions = plan_archive(
+            done_cards=[card], done_at={1: old}, email_label_id=145,
+            now=now, max_age_days=7,
+        )
+        assert actions == []
+
+    def test_archive_still_archives_a_plain_email_card(self):
+        old = 1_700_000_000
+        now = old + 30 * 86400
+        card = make_card(id=2, title="Plain email", stack_id=9,
+                         labels=[FakeLabel(145, "Email")])
+        actions = plan_archive(
+            done_cards=[card], done_at={2: old}, email_label_id=145,
+            now=now, max_age_days=7,
+        )
+        assert len(actions) == 1
+        assert actions[0].card_id == 2
+
+    def test_archive_recurrence_guard_matches_prefix_case_insensitively(self):
+        old = 1_700_000_000
+        now = old + 30 * 86400
+        card = make_card(id=3, title="Odd casing", stack_id=9,
+                         labels=[FakeLabel(145, "Email"), FakeLabel(9, "repeat: mon")])
+        assert plan_archive(
+            done_cards=[card], done_at={3: old}, email_label_id=145,
+            now=now, max_age_days=7,
+        ) == []
 
 
 class TestExecuteArchiveAction:

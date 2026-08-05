@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
 
+from deck_recur import DEFAULT_LABEL_PREFIX
+
 
 # Nextcloud's activity_expire_days is 30 on this deployment. A threshold at or
 # near that value means records expire before a card can qualify, so archiving
@@ -292,7 +294,8 @@ def latest_done_at(entries, board_id: int, done_stack_id: int) -> dict[int, int]
 
 
 def plan_archive(done_cards, done_at: dict[int, int], email_label_id: int,
-                 now: int, max_age_days: int) -> list[ArchiveAction]:
+                 now: int, max_age_days: int,
+                 recur_label_prefix: str = DEFAULT_LABEL_PREFIX) -> list[ArchiveAction]:
     """
     Pure planner for the archive pass.
 
@@ -302,6 +305,8 @@ def plan_archive(done_cards, done_at: dict[int, int], email_label_id: int,
       3. `done_at` has a record for it — otherwise skip silently, the user
          archives those by hand
       4. it has been in Done for at least `max_age_days`
+      5. it carries no recurrence label — a card that recurs must not be
+         archived out from under the recurrence job
 
     `max_age_days <= 0` disables the pass entirely.
     """
@@ -316,6 +321,13 @@ def plan_archive(done_cards, done_at: dict[int, int], email_label_id: int,
             getattr(label, "id", None)
             for label in (getattr(card, "labels", None) or [])
         }
+        recur_prefix = (recur_label_prefix or "").strip().lower()
+        if any(
+            ((getattr(label, "title", "") or "").strip().lower()).startswith(recur_prefix)
+            for label in (getattr(card, "labels", None) or [])
+        ):
+            continue
+
         if email_label_id not in label_ids:
             continue
 
