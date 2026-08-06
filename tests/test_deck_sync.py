@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from imap_deck_sync import (
+from deck_sync import (
     ARCHIVE_MAX_DAYS_LIMIT,
     parse_marker,
     build_marker,
@@ -618,7 +618,7 @@ class _FakeDeckLabels:
 
 class TestFindOrCreateEmailLabel:
     def test_returns_existing_label_matched_by_title(self):
-        from imap_deck_sync import _find_or_create_email_label
+        from deck_sync import _find_or_create_email_label
         existing = SimpleNamespace(id=7, title="Email", color="123456")
         other = SimpleNamespace(id=8, title="Other", color="123456")
         deck = _FakeDeckLabels(existing_labels=[other, existing])
@@ -628,7 +628,7 @@ class TestFindOrCreateEmailLabel:
 
     def test_match_is_by_title_only_not_color(self):
         # A same-color label with a different title must not match.
-        from imap_deck_sync import _find_or_create_email_label
+        from deck_sync import _find_or_create_email_label
         existing_other = SimpleNamespace(id=8, title="Spam", color="808080")
         created = SimpleNamespace(id=99, title="Email", color="808080")
         deck = _FakeDeckLabels(existing_labels=[existing_other], create_returns=created)
@@ -637,7 +637,7 @@ class TestFindOrCreateEmailLabel:
         assert deck.create_calls == [{"board_id": 4, "title": "Email", "color": "808080"}]
 
     def test_creates_label_when_absent(self):
-        from imap_deck_sync import _find_or_create_email_label
+        from deck_sync import _find_or_create_email_label
         created = SimpleNamespace(id=42, title="Email", color="abcdef")
         deck = _FakeDeckLabels(existing_labels=[], create_returns=created)
         result = _find_or_create_email_label(deck, board_id=4, name="Email", color="abcdef")
@@ -646,7 +646,7 @@ class TestFindOrCreateEmailLabel:
 
     def test_raises_runtime_error_if_create_returns_none(self):
         import pytest
-        from imap_deck_sync import _find_or_create_email_label
+        from deck_sync import _find_or_create_email_label
         deck = _FakeDeckLabels(existing_labels=[], create_returns=None)
         with pytest.raises(RuntimeError, match="Email"):
             _find_or_create_email_label(deck, board_id=4, name="Email", color="808080")
@@ -961,7 +961,7 @@ class TestFetchDeckActivity:
 # run() imports its IO dependencies *inside the function body*
 # (`from imap_tools import MailBox`, `from ncdeck import DeckClient`), so
 # tests must patch the attribute on the source module — patching
-# `imap_deck_sync.MailBox` etc. would have no effect, since that name is
+# `deck_sync.MailBox` etc. would have no effect, since that name is
 # never bound at module scope.
 
 ARCHIVE_EMAIL_LABEL_ID = 145

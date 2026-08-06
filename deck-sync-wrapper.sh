@@ -14,7 +14,7 @@ IMAP_OP_ITEM="${IMAP_OP_ITEM:-olen lupus}"
 NEXTCLOUD_PASSWORD="$(op --item="$NC_OP_ITEM" --field=password)"
 IMAP_PASSWORD="$(op --item="$IMAP_OP_ITEM" --field=password)"
 
-exec /home/olen/prog/nextcloud-deck-cli/nextcloud-deck-imap-sync.py \
+exec /home/olen/prog/nextcloud-deck-cli/nextcloud-deck-sync.py \
     --url "${NEXTCLOUD_BASE_URL:-https://cloud.olen.net/}" \
     --username "${NEXTCLOUD_USERNAME:-olen}" \
     --password "$NEXTCLOUD_PASSWORD" \

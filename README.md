@@ -70,7 +70,7 @@ options:
   --do TITLE            Move card back to "Todo" stack
 ```
 
-# nextcloud-deck-imap-sync
+# nextcloud-deck-sync
 
 Syncs starred email to a Nextcloud Deck board. Starring a message in any mail
 client creates a card in the `Todo` stack. Moving that card to `Done` clears
@@ -117,28 +117,26 @@ Archived and trashed cards are left alone. Disable the pass with
 Use `--dry-run` to see the full plan without making any IMAP or Deck changes
 — the safe way to try it out.
 
-**Private dependency:** `nextcloud-deck-imap-sync.py` imports logging and
+**Private dependency:** `nextcloud-deck-sync.py` imports logging and
 Discord/IRC alerting helpers from a private package (`olen`) at module load,
 so this entry point cannot currently run outside its author's environment.
-The underlying library, `imap_deck_sync.py`, has no such dependency; removing
+The underlying library, `deck_sync.py`, has no such dependency; removing
 the `olen` dependency from the entry point is planned.
 
 ## Usage:
 ```
-usage: nextcloud-deck-imap-sync.py [-h] [--url URL] [-u USERNAME]
-                                   [-p PASSWORD] [-b BOARD_ID]
-                                   [--todo-name TODO_NAME]
-                                   [--doing-name DOING_NAME]
-                                   [--done-name DONE_NAME]
-                                   [--email-label-name EMAIL_LABEL_NAME]
-                                   [--email-label-color EMAIL_LABEL_COLOR]
-                                   [--imap-host IMAP_HOST]
-                                   [--imap-port IMAP_PORT]
-                                   [--imap-user IMAP_USER]
-                                   [--imap-password IMAP_PASSWORD]
-                                   [--imap-folder IMAP_FOLDER]
-                                   [--archive-done-after-days ARCHIVE_DONE_AFTER_DAYS]
-                                   [--dry-run] [--no-done-sync] [-v]
+usage: nextcloud-deck-sync.py [-h] [--url URL] [-u USERNAME] [-p PASSWORD]
+                              [-b BOARD_ID] [--todo-name TODO_NAME]
+                              [--doing-name DOING_NAME]
+                              [--done-name DONE_NAME]
+                              [--email-label-name EMAIL_LABEL_NAME]
+                              [--email-label-color EMAIL_LABEL_COLOR]
+                              [--imap-host IMAP_HOST] [--imap-port IMAP_PORT]
+                              [--imap-user IMAP_USER]
+                              [--imap-password IMAP_PASSWORD]
+                              [--imap-folder IMAP_FOLDER]
+                              [--archive-done-after-days ARCHIVE_DONE_AFTER_DAYS]
+                              [--dry-run] [--no-done-sync] [-v]
 
 Sync IMAP starred messages to/from a Nextcloud Deck Todo board.
 

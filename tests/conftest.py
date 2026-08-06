@@ -1,5 +1,5 @@
 """
-Make the project root importable so tests can `import imap_deck_sync`
+Make the project root importable so tests can `import deck_sync`
 without installing the project.
 """
 import sys
