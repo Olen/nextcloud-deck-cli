@@ -85,16 +85,30 @@ messages works.
 
 Cards carrying the label that have sat in `Done` longer than
 `--archive-done-after-days` (default 7) are archived. Time-in-Done is read
-from the Nextcloud Activity log rather than the card's `lastModified`, since
-this client's `move_card()` (a `reorder`-endpoint workaround for
-[Deck#6830](https://github.com/nextcloud/deck/issues/6830)) rewrites
-`lastModified` on every card in the target stack when it moves a card into
-it. Activity retention is admin-configurable via Nextcloud's
+from the Nextcloud Activity log rather than the card's `lastModified`,
+because `lastModified` does not mean what it looks like it means: Deck's web
+UI still moves cards with the `reorder` endpoint, which rewrites
+`lastModified` on **every** card in the target stack. One drag-and-drop into
+`Done` therefore restamps everything already sitting in `Done`, so a card's
+`lastModified` records when anything last landed in that stack, not when that
+card did. (This client's `move_card()` no longer uses `reorder` — since
+ncdeck 1.1.0 it PUTs the update route addressed at the target stack, see
+[Deck#6830](https://github.com/nextcloud/deck/issues/6830) — but the UI does,
+and the UI is how cards usually get there.)
+
+Activity retention is admin-configurable via Nextcloud's
 `activity_expire_days` setting and was 30 days on the instance this was built
 against — size the threshold against your own instance's setting. Values of
 25 or more are rejected at startup, and 0 or less disables the archiving
 pass. Cards with no move-to-Done record in the activity window are left
 alone.
+
+Cards carrying a recurrence label (see `nextcloud-deck-recur` below) are never
+archived, and are never moved back to `Done` by the unstarred-message pass —
+either would break the recurrence cycle. Set `--recur-label-prefix` /
+`RECUR_LABEL_PREFIX` to the same value as `nextcloud-deck-recur.py`'s
+`--label-prefix`; an empty prefix is rejected at startup, since it would match
+every label and disable both passes board-wide.
 
 ### done-tick sync
 
@@ -136,6 +150,7 @@ usage: nextcloud-deck-sync.py [-h] [--url URL] [-u USERNAME] [-p PASSWORD]
                               [--imap-password IMAP_PASSWORD]
                               [--imap-folder IMAP_FOLDER]
                               [--archive-done-after-days ARCHIVE_DONE_AFTER_DAYS]
+                              [--recur-label-prefix RECUR_LABEL_PREFIX]
                               [--dry-run] [--no-done-sync] [-v]
 
 Sync IMAP starred messages to/from a Nextcloud Deck Todo board.
@@ -162,6 +177,11 @@ options:
   --archive-done-after-days ARCHIVE_DONE_AFTER_DAYS
                         Archive Email-labelled cards that have been in Done
                         this many days. 0 or less disables the pass.
+  --recur-label-prefix RECUR_LABEL_PREFIX
+                        Title prefix marking a label as a recurrence schedule.
+                        Cards carrying one are never archived and are never
+                        moved back to Done by the unstarred-message pass. Must
+                        match nextcloud-deck-recur.py's --label-prefix.
   --dry-run             Plan everything; perform no IMAP or Deck mutations.
   --no-done-sync        Disable the done-tick <-> Done stack sync pass.
   -v, --verbose
@@ -200,7 +220,9 @@ arrives as an open task.
 There is no state file. The move out of `Done` is itself the record that the
 card has recurred, which is why this must run **once a day** — at a shorter
 interval, re-completing a card on its own trigger day would send it straight
-back. Deployed as `deck-recur.timer`, daily at 04:15.
+back. Deployed as `deck-recur.timer`, daily at 04:17 — deliberately off the
+`*:0/5` boundary `deck-sync.timer` fires on, so the two jobs do not snapshot
+the same card at the same moment.
 
 If the host is down for a whole trigger day, those cards wait for the next
 occurrence. Replay a missed day with `--date`.

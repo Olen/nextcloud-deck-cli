@@ -16,7 +16,13 @@ from pathlib import Path
 # Make the sibling module importable when running this script directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from deck_sync import Config, run, validate_archive_days  # noqa: E402
+from deck_sync import (  # noqa: E402
+    DEFAULT_LABEL_PREFIX,
+    Config,
+    run,
+    validate_archive_days,
+    validate_recur_label_prefix,
+)
 from olen.config import APP_CONFIG
 from olen.const import ATTR_APP, ATTR_LOG
 from olen.log import get_logger
@@ -56,6 +62,12 @@ def main() -> int:
                    default=int(env("ARCHIVE_DONE_AFTER_DAYS", "7")),
                    help="Archive Email-labelled cards that have been in Done this "
                         "many days. 0 or less disables the pass.")
+    p.add_argument("--recur-label-prefix",
+                   default=env("RECUR_LABEL_PREFIX", DEFAULT_LABEL_PREFIX),
+                   help="Title prefix marking a label as a recurrence schedule. "
+                        "Cards carrying one are never archived and are never "
+                        "moved back to Done by the unstarred-message pass. Must "
+                        "match nextcloud-deck-recur.py's --label-prefix.")
 
     # Modes
     p.add_argument("--dry-run", action="store_true",
@@ -105,6 +117,11 @@ def main() -> int:
         print(err, file=sys.stderr)
         return 2
 
+    err = validate_recur_label_prefix(args.recur_label_prefix)
+    if err:
+        print(err, file=sys.stderr)
+        return 2
+
     cfg = Config(
         nc_url=args.url,
         nc_username=args.username,
@@ -121,6 +138,7 @@ def main() -> int:
         imap_password=args.imap_password,
         imap_folder=args.imap_folder,
         archive_done_after_days=args.archive_done_after_days,
+        recur_label_prefix=args.recur_label_prefix,
         done_sync=args.done_sync,
         dry_run=args.dry_run,
         verbose=args.verbose,

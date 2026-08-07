@@ -38,6 +38,43 @@ def validate_archive_days(days: int) -> str | None:
     return None
 
 
+def validate_recur_label_prefix(prefix: str) -> str | None:
+    """Return an error message if the recurrence prefix is unusable, else None."""
+    if not (prefix or "").strip():
+        return (
+            "--recur-label-prefix must not be empty. An empty prefix matches "
+            "every label title, which would exclude every card from the archive "
+            "pass and from the move-to-Done pass."
+        )
+    return None
+
+
+def _normalize_recur_prefix(prefix: Optional[str]) -> str:
+    """Stripped, lower-cased recurrence prefix for title comparisons."""
+    return (prefix or "").strip().lower()
+
+
+def _has_recur_label(card, recur_prefix: str) -> bool:
+    """
+    True when `card` carries a label whose title starts with `recur_prefix`.
+
+    `recur_prefix` must already be normalised by `_normalize_recur_prefix()`.
+
+    An empty prefix matches *nothing* here. `"anything".startswith("")` is
+    True, so the naive reading would treat every card as recurring and
+    silently exclude the whole board from the passes that use this guard.
+    A misconfigured prefix is rejected at startup by
+    `validate_recur_label_prefix()`; this is the second line of defence, and
+    it fails towards the ordinary email flow rather than towards paralysis.
+    """
+    if not recur_prefix:
+        return False
+    return any(
+        ((getattr(label, "title", "") or "").strip().lower()).startswith(recur_prefix)
+        for label in (getattr(card, "labels", None) or [])
+    )
+
+
 def build_marker(message_id: str) -> str:
     """Return the HTML-comment marker for a Message-ID."""
     return f"<!-- imap-sync: message-id={message_id} -->"
@@ -169,6 +206,7 @@ def make_plan(
     managed: dict[str, ManagedCard],
     stack_ids: StackIds,
     email_label_id: int,
+    recur_label_prefix: str = DEFAULT_LABEL_PREFIX,
 ) -> list[Action]:
     """
     Pure reconciliation function. Inputs are the current state; output is a
@@ -178,6 +216,9 @@ def make_plan(
     the same Message-ID. We achieve this by tracking message_ids that have
     been handled in Pass A and skipping them in Pass C.
 
+    Pass B exempts cards carrying a recurrence label (title starting with
+    `recur_label_prefix`), the same exemption `plan_archive` applies.
+
     Pass D: retro-tags any managed card missing the Email label, regardless of
     which stack the card lives in.
 
@@ -185,6 +226,7 @@ def make_plan(
     """
     actions: list[Action] = []
     handled: set[str] = set()
+    recur_prefix = _normalize_recur_prefix(recur_label_prefix)
 
     # Pass A: cards in Done where the message is still starred → unstar.
     for msgid, mc in managed.items():
@@ -193,9 +235,19 @@ def make_plan(
             handled.add(msgid)
 
     # Pass B: cards in Todo/Doing where the message is no longer starred → move to Done.
+    #
+    # Recurring cards are exempt. A card born from a starred email keeps its
+    # imap-sync marker, so it stays in `managed` forever; once the user adds a
+    # recurrence label and completes it, Pass A unstars the message for good.
+    # Without this exemption, the recurrence job's move back into Todo would be
+    # undone by the next 5-minute sync — the chore would flash into view and
+    # vanish. plan_archive exempts the same cards for the same reason.
     for msgid, mc in managed.items():
-        if mc.stack_id in (stack_ids.todo, stack_ids.doing) and msgid not in starred:
-            actions.append(MoveToDoneAction(card=mc.card, target_stack_id=stack_ids.done))
+        if mc.stack_id not in (stack_ids.todo, stack_ids.doing) or msgid in starred:
+            continue
+        if _has_recur_label(mc.card, recur_prefix):
+            continue
+        actions.append(MoveToDoneAction(card=mc.card, target_stack_id=stack_ids.done))
 
     # Pass C: messages newly starred (no matching managed card) → create in Todo.
     # Cards in custom stacks (e.g. "Later") DO appear in `managed` so we skip them here.
@@ -314,20 +366,17 @@ def plan_archive(done_cards, done_at: dict[int, int], email_label_id: int,
         return []
 
     cutoff_seconds = max_age_days * 86400
+    recur_prefix = _normalize_recur_prefix(recur_label_prefix)
     actions: list[ArchiveAction] = []
 
     for card in done_cards or []:
+        if _has_recur_label(card, recur_prefix):
+            continue
+
         label_ids = {
             getattr(label, "id", None)
             for label in (getattr(card, "labels", None) or [])
         }
-        recur_prefix = (recur_label_prefix or "").strip().lower()
-        if any(
-            ((getattr(label, "title", "") or "").strip().lower()).startswith(recur_prefix)
-            for label in (getattr(card, "labels", None) or [])
-        ):
-            continue
-
         if email_label_id not in label_ids:
             continue
 
@@ -351,7 +400,7 @@ def plan_archive(done_cards, done_at: dict[int, int], email_label_id: int,
 
 
 def plan_done_sync(done_cards, open_cards, done_stack_id: int,
-                   now_iso: str) -> list:
+                   now_iso: str, skip_card_ids=()) -> list:
     """
     Pure planner keeping Deck's per-card `done` field and membership of the
     Done stack in agreement.
@@ -370,11 +419,20 @@ def plan_done_sync(done_cards, open_cards, done_stack_id: int,
     Archived and trashed cards are skipped in both directions. Deck's update
     endpoint hardcodes `deletedAt` to 0, so touching a trashed card would
     restore it from the trash.
+
+    `skip_card_ids` are cards another pass in the same plan already moves into
+    Done — an unstarred, hand-ticked card is both a Pass B `MoveToDoneAction`
+    and a `MoveToDoneByTickAction`, which would be two identical PUTs and two
+    activity entries for one logical move. The caller owns that set because
+    only it sees the whole plan.
     """
     actions: list = []
+    skip = set(skip_card_ids or ())
 
     for card in done_cards or []:
         if getattr(card, "archived", False) or getattr(card, "deleted_at", 0):
+            continue
+        if getattr(card, "id", None) in skip:
             continue
         if getattr(card, "done", None) is None:
             actions.append(
@@ -387,6 +445,8 @@ def plan_done_sync(done_cards, open_cards, done_stack_id: int,
 
     for card in open_cards or []:
         if getattr(card, "archived", False) or getattr(card, "deleted_at", 0):
+            continue
+        if getattr(card, "id", None) in skip:
             continue
         if getattr(card, "done", None) is not None:
             actions.append(
@@ -675,6 +735,9 @@ class Config:
     imap_password: str
     imap_folder: str
     archive_done_after_days: int = 7
+    # Must match nextcloud-deck-recur.py's --label-prefix: the archive pass and
+    # Pass B use it to recognise (and leave alone) cards the recurrence job owns.
+    recur_label_prefix: str = DEFAULT_LABEL_PREFIX
     done_sync: bool = True
     dry_run: bool = False
     verbose: bool = False
@@ -759,24 +822,6 @@ def run(config: Config) -> int:
     managed = fetch_managed(stacks)
     log.info("Found %d managed card(s) on board %s", len(managed), config.nc_board_id)
 
-    done_sync_actions: list = []
-    if config.done_sync:
-        open_cards = (
-            (getattr(todo, "cards", None) or [])
-            + (getattr(doing, "cards", None) or [])
-        )
-        done_sync_actions = plan_done_sync(
-            done_cards=getattr(done, "cards", None) or [],
-            open_cards=open_cards,
-            done_stack_id=done.id,
-            now_iso=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        )
-        ticks = sum(1 for a in done_sync_actions if isinstance(a, TickDoneAction))
-        log.info(
-            "Done-tick pass: %d card(s) in %s to tick, %d ticked card(s) to move in",
-            ticks, config.done_stack_name, len(done_sync_actions) - ticks,
-        )
-
     archive_actions: list[ArchiveAction] = []
     activity_failures = 0
     if config.archive_done_after_days > 0:
@@ -794,6 +839,7 @@ def run(config: Config) -> int:
                 email_label_id=email_label.id,
                 now=int(time.time()),
                 max_age_days=config.archive_done_after_days,
+                recur_label_prefix=config.recur_label_prefix,
             )
             log.info(
                 "Archive pass: %d of %d card(s) in %s eligible "
@@ -809,12 +855,40 @@ def run(config: Config) -> int:
             starred = fetch_starred(mailbox.fetch(mark_seen=False, bulk=True))
             log.info("Found %d starred message(s) in %s", len(starred), config.imap_folder)
 
-            plan = make_plan(
+            imap_actions = make_plan(
                 starred=starred,
                 managed=managed,
                 stack_ids=stack_ids,
                 email_label_id=email_label.id,
-            ) + done_sync_actions + archive_actions
+                recur_label_prefix=config.recur_label_prefix,
+            )
+
+            # Planned after make_plan so it can see which cards Pass B already
+            # moves into Done, and skip them (one move, not two).
+            done_sync_actions: list = []
+            if config.done_sync:
+                open_cards = (
+                    (getattr(todo, "cards", None) or [])
+                    + (getattr(doing, "cards", None) or [])
+                )
+                moving_to_done = {
+                    getattr(a.card, "id", None) for a in imap_actions
+                    if isinstance(a, MoveToDoneAction)
+                }
+                done_sync_actions = plan_done_sync(
+                    done_cards=getattr(done, "cards", None) or [],
+                    open_cards=open_cards,
+                    done_stack_id=done.id,
+                    now_iso=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    skip_card_ids=moving_to_done,
+                )
+                ticks = sum(1 for a in done_sync_actions if isinstance(a, TickDoneAction))
+                log.info(
+                    "Done-tick pass: %d card(s) in %s to tick, %d ticked card(s) to move in",
+                    ticks, config.done_stack_name, len(done_sync_actions) - ticks,
+                )
+
+            plan = imap_actions + done_sync_actions + archive_actions
             log.info("Plan: %d action(s)%s",
                      len(plan), " (dry-run)" if config.dry_run else "")
 

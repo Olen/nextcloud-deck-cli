@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -27,8 +28,10 @@ from deck_sync import (
     ExecutionSummary,
     Config,
     validate_archive_days,
+    validate_recur_label_prefix,
     run,
 )
+from deck_recur import DEFAULT_LABEL_PREFIX
 
 
 class TestBuildMarker:
@@ -113,11 +116,16 @@ def _starred(msgid, uid="1", name="Alice", addr="alice@example.com", subject="Hi
     return StarredMessage(message_id=msgid, uid=uid, from_name=name, from_addr=addr, subject=subject)
 
 
-def _managed(msgid, stack_id, card_id=42, label_ids=()):
-    # Card is opaque to the planner — we only need an identity for downstream actions.
+def _managed(msgid, stack_id, card_id=42, label_ids=(), label_titles=()):
+    # Card is opaque to the planner — we only need an identity for downstream
+    # actions, plus the label titles Pass B's recurrence exemption reads.
     # We pass a SimpleNamespace so production code can attach a real Card here.
     from types import SimpleNamespace
-    card = SimpleNamespace(id=card_id, title="(irrelevant)")
+    card = SimpleNamespace(
+        id=card_id,
+        title="(irrelevant)",
+        labels=[_FakeLabel(id=900 + i, title=t) for i, t in enumerate(label_titles)],
+    )
     return ManagedCard(
         message_id=msgid,
         card=card,
@@ -267,6 +275,99 @@ class TestMakePlan:
         assigns = [a for a in plan if isinstance(a, AssignLabelAction)]
         assert len(assigns) == 1
         assert assigns[0].stack_id == 99
+
+
+class TestMakePlanRecurrenceExemption:
+    """Pass B must not undo what the recurrence job just did.
+
+    A card created from a starred email keeps its imap-sync marker forever, so
+    it stays in `managed`. Add `Repeat: 25` to it and complete it once: Pass A
+    unstars the message permanently. On the 25th the recurrence job puts the
+    card back in Todo — and without this exemption the next 5-minute sync would
+    move it straight back to Done.
+    """
+
+    def test_pass_b_skips_a_card_carrying_a_recurrence_label(self):
+        managed = {
+            "<a@x>": _managed("<a@x>", stack_id=1, label_ids=(EMAIL_LABEL_ID,),
+                              label_titles=("Email", "Repeat: 25")),
+        }
+        plan = make_plan(starred={}, managed=managed, stack_ids=_stack_ids(),
+                         email_label_id=EMAIL_LABEL_ID)
+        assert [a for a in plan if isinstance(a, MoveToDoneAction)] == []
+
+    def test_pass_b_still_moves_a_managed_card_without_a_recurrence_label(self):
+        # The regression guard: the ordinary email flow must keep working.
+        managed = {
+            "<a@x>": _managed("<a@x>", stack_id=1, label_ids=(EMAIL_LABEL_ID,),
+                              label_titles=("Email",)),
+        }
+        plan = make_plan(starred={}, managed=managed, stack_ids=_stack_ids(),
+                         email_label_id=EMAIL_LABEL_ID)
+        moves = [a for a in plan if isinstance(a, MoveToDoneAction)]
+        assert len(moves) == 1
+        assert moves[0].target_stack_id == 3
+
+    def test_pass_b_exemption_also_covers_the_doing_stack(self):
+        managed = {
+            "<a@x>": _managed("<a@x>", stack_id=2, label_ids=(EMAIL_LABEL_ID,),
+                              label_titles=("Repeat: daily",)),
+        }
+        plan = make_plan(starred={}, managed=managed, stack_ids=_stack_ids(),
+                         email_label_id=EMAIL_LABEL_ID)
+        assert [a for a in plan if isinstance(a, MoveToDoneAction)] == []
+
+    def test_pass_b_exemption_matches_the_prefix_case_insensitively(self):
+        managed = {
+            "<a@x>": _managed("<a@x>", stack_id=1, label_ids=(EMAIL_LABEL_ID,),
+                              label_titles=("  repeat: mon  ",)),
+        }
+        plan = make_plan(starred={}, managed=managed, stack_ids=_stack_ids(),
+                         email_label_id=EMAIL_LABEL_ID)
+        assert [a for a in plan if isinstance(a, MoveToDoneAction)] == []
+
+    def test_pass_b_honours_a_custom_recurrence_prefix(self):
+        managed = {
+            "<a@x>": _managed("<a@x>", stack_id=1, label_ids=(EMAIL_LABEL_ID,),
+                              label_titles=("Gjenta: 25",)),
+        }
+        # Default prefix does not recognise it -> card is moved.
+        assert any(
+            isinstance(a, MoveToDoneAction)
+            for a in make_plan(starred={}, managed=managed, stack_ids=_stack_ids(),
+                               email_label_id=EMAIL_LABEL_ID)
+        )
+        # Configured prefix does -> card is left alone.
+        plan = make_plan(starred={}, managed=managed, stack_ids=_stack_ids(),
+                         email_label_id=EMAIL_LABEL_ID,
+                         recur_label_prefix="Gjenta:")
+        assert [a for a in plan if isinstance(a, MoveToDoneAction)] == []
+
+    def test_empty_prefix_does_not_exempt_every_card(self):
+        # "".startswith("") is True for every label, so a naive implementation
+        # would treat the whole board as recurring and stop syncing entirely.
+        # An empty prefix is rejected at startup; if one gets through anyway,
+        # fail towards the ordinary email flow.
+        managed = {
+            "<a@x>": _managed("<a@x>", stack_id=1, label_ids=(EMAIL_LABEL_ID,),
+                              label_titles=("Email",)),
+        }
+        plan = make_plan(starred={}, managed=managed, stack_ids=_stack_ids(),
+                         email_label_id=EMAIL_LABEL_ID, recur_label_prefix="")
+        assert len([a for a in plan if isinstance(a, MoveToDoneAction)]) == 1
+
+    def test_pass_a_is_unaffected_by_a_recurrence_label(self):
+        # A recurring card sitting in Done with its message still starred must
+        # still get the star cleared — the exemption is Pass B only.
+        managed = {
+            "<a@x>": _managed("<a@x>", stack_id=3, label_ids=(EMAIL_LABEL_ID,),
+                              label_titles=("Repeat: 25",)),
+        }
+        plan = make_plan(starred={"<a@x>": _starred("<a@x>")}, managed=managed,
+                         stack_ids=_stack_ids(), email_label_id=EMAIL_LABEL_ID)
+        assert [a for a in plan if isinstance(a, UnstarAction)] == [
+            UnstarAction(uid="1", message_id="<a@x>")
+        ]
 
 
 class _FakeLabel:
@@ -848,6 +949,53 @@ class TestPlanArchive:
             now=now, max_age_days=7,
         ) == []
 
+    def test_archive_honours_a_custom_recurrence_prefix(self):
+        old = 1_700_000_000
+        now = old + 30 * 86400
+        card = make_card(id=4, title="Custom prefix", stack_id=9,
+                         labels=[_FakeLabel(145, "Email"), _FakeLabel(9, "Gjenta: 25")])
+        assert plan_archive(
+            done_cards=[card], done_at={4: old}, email_label_id=145,
+            now=now, max_age_days=7, recur_label_prefix="Gjenta:",
+        ) == []
+        # ... and the default prefix does not recognise it.
+        assert len(plan_archive(
+            done_cards=[card], done_at={4: old}, email_label_id=145,
+            now=now, max_age_days=7,
+        )) == 1
+
+    def test_empty_prefix_does_not_exempt_every_card_from_archiving(self):
+        # An empty prefix would make startswith() true for every label and
+        # silently switch the archive pass off board-wide.
+        old = 1_700_000_000
+        now = old + 30 * 86400
+        card = make_card(id=5, title="Plain email", stack_id=9,
+                         labels=[_FakeLabel(145, "Email")])
+        assert len(plan_archive(
+            done_cards=[card], done_at={5: old}, email_label_id=145,
+            now=now, max_age_days=7, recur_label_prefix="",
+        )) == 1
+
+
+class TestValidateRecurLabelPrefix:
+    def test_rejects_empty_string(self):
+        assert validate_recur_label_prefix("") is not None
+
+    def test_rejects_whitespace_only(self):
+        assert validate_recur_label_prefix("   \t ") is not None
+
+    def test_rejects_none(self):
+        assert validate_recur_label_prefix(None) is not None
+
+    def test_accepts_the_default(self):
+        assert validate_recur_label_prefix(DEFAULT_LABEL_PREFIX) is None
+
+    def test_accepts_a_custom_prefix(self):
+        assert validate_recur_label_prefix("Gjenta:") is None
+
+    def test_message_names_the_flag(self):
+        assert "--recur-label-prefix" in validate_recur_label_prefix("")
+
 
 class TestExecuteArchiveAction:
     def _deck(self):
@@ -1267,6 +1415,29 @@ class TestPlanDoneSync:
         assert second == []
 
 
+class TestPlanDoneSyncSkipCardIds:
+    """A card another pass already moves into Done must not be moved twice."""
+
+    def test_skips_an_open_card_already_targeted_by_another_move(self):
+        card = make_card(id=1, title="Chore", stack_id=22, done=DONE_SYNC_NOW_ISO)
+        assert plan_done_sync([], [card], done_stack_id=9,
+                              now_iso=DONE_SYNC_NOW_ISO, skip_card_ids={1}) == []
+
+    def test_only_the_named_card_is_skipped(self):
+        skipped = make_card(id=1, title="A", stack_id=22, done=DONE_SYNC_NOW_ISO)
+        other = make_card(id=2, title="B", stack_id=22, done=DONE_SYNC_NOW_ISO)
+        actions = plan_done_sync([], [skipped, other], done_stack_id=9,
+                                 now_iso=DONE_SYNC_NOW_ISO, skip_card_ids={1})
+        assert actions == [
+            MoveToDoneByTickAction(card=other, card_title="B", target_stack_id=9)
+        ]
+
+    def test_default_skips_nothing(self):
+        card = make_card(id=1, title="Chore", stack_id=22, done=DONE_SYNC_NOW_ISO)
+        assert len(plan_done_sync([], [card], done_stack_id=9,
+                                  now_iso=DONE_SYNC_NOW_ISO)) == 1
+
+
 class TestExecuteDoneSyncActions:
     def test_execute_tick_calls_patch_card_with_the_timestamp(self):
         card = make_card(id=110, title="Vanne planter", stack_id=9, done=None)
@@ -1315,3 +1486,319 @@ class TestExecuteDoneSyncActions:
         )
         assert deck.patched == []
         assert summary.ticked == 1
+
+
+# --- run() wiring: the done-tick pass ---
+
+
+def _managed_run_card(card_id, message_id, stack_id, title="Managed card",
+                      done=None, label_ids=(ARCHIVE_EMAIL_LABEL_ID,),
+                      label_titles=()):
+    """A card carrying the imap-sync marker, shaped for the run() fakes."""
+    labels = [SimpleNamespace(id=lid, title="Email") for lid in label_ids]
+    labels += [SimpleNamespace(id=800 + i, title=t)
+               for i, t in enumerate(label_titles)]
+    return SimpleNamespace(
+        id=card_id, title=title, stack_id=stack_id,
+        description=f"{build_marker(message_id)}\n",
+        done=done, archived=False, deleted_at=0, labels=labels,
+    )
+
+
+def _capture_plan(monkeypatch):
+    """Record the plan run() hands to execute_plan, then execute it for real."""
+    import deck_sync
+
+    captured = {}
+    real_execute = deck_sync.execute_plan
+
+    def spy(plan, mailbox, deck, dry_run=False):
+        captured["plan"] = list(plan)
+        return real_execute(plan=plan, mailbox=mailbox, deck=deck, dry_run=dry_run)
+
+    monkeypatch.setattr("deck_sync.execute_plan", spy)
+    return captured
+
+
+class TestRunDoneSyncWiring:
+    """The done-tick pass writes to a live board every five minutes.
+
+    Without these, deleting `+ done_sync_actions` from run() leaves the whole
+    suite green while the pass silently stops running.
+    """
+
+    def _patch_deps(self, monkeypatch, deck, mailbox):
+        monkeypatch.setattr("ncdeck.DeckClient", lambda *a, **kw: deck)
+        monkeypatch.setattr("imap_tools.MailBox", _fake_mailbox_class(mailbox))
+
+    def test_done_sync_runs_by_default_and_its_actions_reach_the_plan(self, monkeypatch):
+        unticked = make_card(id=110, title="Vanne planter", stack_id=9, done=None)
+        stacks = [
+            _run_stack(7, "Todo"), _run_stack(8, "Doing"),
+            _run_stack(9, "Done", cards=[unticked]),
+        ]
+        deck = _FakeRunDeck(stacks=stacks)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+        captured = _capture_plan(monkeypatch)
+
+        rc = run(_run_config(archive_done_after_days=0))
+
+        assert rc == 0
+        assert [type(a).__name__ for a in captured["plan"]] == ["TickDoneAction"]
+        assert [card_id for card_id, _ in deck.patched] == [110]
+
+    def test_done_sync_false_suppresses_the_pass_entirely(self, monkeypatch):
+        unticked = make_card(id=110, title="Vanne planter", stack_id=9, done=None)
+        ticked_in_todo = make_card(id=111, title="Chore", stack_id=7,
+                                   done=DONE_SYNC_NOW_ISO)
+        stacks = [
+            _run_stack(7, "Todo", cards=[ticked_in_todo]), _run_stack(8, "Doing"),
+            _run_stack(9, "Done", cards=[unticked]),
+        ]
+        deck = _FakeRunDeck(stacks=stacks)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+        captured = _capture_plan(monkeypatch)
+
+        rc = run(_run_config(archive_done_after_days=0, done_sync=False))
+
+        assert rc == 0
+        assert captured["plan"] == []
+        assert deck.patched == []
+        assert deck.moved == []
+
+    def test_open_cards_are_drawn_from_both_todo_and_doing(self, monkeypatch):
+        # Assembling open_cards from Todo alone would leave a card hand-ticked
+        # in Doing sitting there forever.
+        in_todo = make_card(id=1, title="From Todo", stack_id=7, done=DONE_SYNC_NOW_ISO)
+        in_doing = make_card(id=2, title="From Doing", stack_id=8, done=DONE_SYNC_NOW_ISO)
+        stacks = [
+            _run_stack(7, "Todo", cards=[in_todo]),
+            _run_stack(8, "Doing", cards=[in_doing]),
+            _run_stack(9, "Done"),
+        ]
+        deck = _FakeRunDeck(stacks=stacks)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+
+        rc = run(_run_config(archive_done_after_days=0))
+
+        assert rc == 0
+        assert sorted(m["card_id"] for m in deck.moved) == [1, 2]
+        assert {m["target"] for m in deck.moved} == {9}
+
+    def test_plan_order_is_imap_then_done_sync_then_archive(self, monkeypatch):
+        # Positional, not incidental: the IMAP pass must be able to unstar a
+        # message before anything else touches its card, and the archive pass
+        # runs last so it sees the day's moves. Nothing else pins this down.
+        managed_in_todo = _managed_run_card(500, "<m@x>", stack_id=7)
+        ticked_in_doing = make_card(id=600, title="Hand-ticked", stack_id=8,
+                                    done=DONE_SYNC_NOW_ISO)
+        stale_in_done = done_card(319, label_ids=(ARCHIVE_EMAIL_LABEL_ID,), stack_id=9)
+        stacks = [
+            _run_stack(7, "Todo", cards=[managed_in_todo]),
+            _run_stack(8, "Doing", cards=[ticked_in_doing]),
+            _run_stack(9, "Done", cards=[stale_in_done]),
+        ]
+        activity = [activity_entry(319, "2020-01-01T00:00:00+00:00", board="4", stack="9")]
+        deck = _FakeRunDeck(stacks=stacks, activity=activity)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+        captured = _capture_plan(monkeypatch)
+
+        rc = run(_run_config(archive_done_after_days=7))
+
+        assert rc == 0
+        plan = captured["plan"]
+        assert [type(a).__name__ for a in plan] == [
+            "MoveToDoneAction",         # IMAP pass (Pass B)
+            "TickDoneAction",           # done-sync, Done side
+            "MoveToDoneByTickAction",   # done-sync, open side
+            "ArchiveAction",            # archive pass
+        ]
+        assert plan[0].card.id == 500
+        assert plan[1].card.id == 319
+        assert plan[2].card.id == 600
+        assert plan[3].card_id == 319
+
+    def test_unstarred_and_hand_ticked_card_is_moved_once(self, monkeypatch):
+        # Pass B and the done-sync open-side clause both want to move this
+        # card into Done. Two PUTs, two activity entries, one logical move.
+        card = _managed_run_card(500, "<m@x>", stack_id=7, done=DONE_SYNC_NOW_ISO)
+        stacks = [
+            _run_stack(7, "Todo", cards=[card]),
+            _run_stack(8, "Doing"), _run_stack(9, "Done"),
+        ]
+        deck = _FakeRunDeck(stacks=stacks)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+        captured = _capture_plan(monkeypatch)
+
+        rc = run(_run_config(archive_done_after_days=0))
+
+        assert rc == 0
+        assert [type(a).__name__ for a in captured["plan"]] == ["MoveToDoneAction"]
+        assert deck.moved == [
+            {"card_id": 500, "target": 9, "order": 0, "clear_done": False}
+        ]
+
+    def test_recurring_card_in_todo_survives_a_full_run(self, monkeypatch):
+        # End-to-end guard for the recurrence regression: the card the daily
+        # recurrence job just put back in Todo must still be there afterwards.
+        card = _managed_run_card(501, "<m@x>", stack_id=7,
+                                 title="Vask bilen", label_titles=("Repeat: 25",))
+        stacks = [
+            _run_stack(7, "Todo", cards=[card]),
+            _run_stack(8, "Doing"), _run_stack(9, "Done"),
+        ]
+        deck = _FakeRunDeck(stacks=stacks)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+        captured = _capture_plan(monkeypatch)
+
+        rc = run(_run_config(archive_done_after_days=0))
+
+        assert rc == 0
+        assert captured["plan"] == []
+        assert deck.moved == []
+        assert card.stack_id == 7
+
+    def test_configured_recur_prefix_reaches_both_passes(self, monkeypatch):
+        # One source of truth: a non-default prefix must be honoured by Pass B
+        # and by the archive pass, or recurring cards get archived after a week
+        # and never come back.
+        in_todo = _managed_run_card(502, "<a@x>", stack_id=7,
+                                    label_titles=("Gjenta: 25",))
+        in_done = make_card(id=503, title="Recurring", stack_id=9,
+                            done=DONE_SYNC_NOW_ISO,
+                            labels=[_FakeLabel(ARCHIVE_EMAIL_LABEL_ID, "Email"),
+                                    _FakeLabel(9, "Gjenta: 25")])
+        stacks = [
+            _run_stack(7, "Todo", cards=[in_todo]), _run_stack(8, "Doing"),
+            _run_stack(9, "Done", cards=[in_done]),
+        ]
+        activity = [activity_entry(503, "2020-01-01T00:00:00+00:00", board="4", stack="9")]
+        deck = _FakeRunDeck(stacks=stacks, activity=activity)
+        mailbox = _FakeRunMailbox(messages=[])
+        self._patch_deps(monkeypatch, deck, mailbox)
+        captured = _capture_plan(monkeypatch)
+
+        rc = run(_run_config(archive_done_after_days=7,
+                             recur_label_prefix="Gjenta:"))
+
+        assert rc == 0
+        assert captured["plan"] == []
+        assert deck.moved == []
+        assert deck.archived == []
+
+
+# --- CLI entrypoint: argument validation ---
+#
+# nextcloud-deck-sync.py has a dash in its name and imports the private `olen`
+# logging package at module scope, so it is loaded by path and skipped where
+# that package is absent. The logger/alerting side effects are stubbed out —
+# these tests must not write to the real ~/bin/logs or reach Discord.
+
+
+def _load_sync_cli(monkeypatch):
+    import importlib.util
+    import pytest
+
+    pytest.importorskip("olen")
+    path = Path(__file__).resolve().parent.parent / "nextcloud-deck-sync.py"
+    spec = importlib.util.spec_from_file_location("nextcloud_deck_sync_cli", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class _StubAppLog:
+        DEBUG = 10
+        INFO = 20
+
+        def __init__(self):
+            self.silent = False
+
+        def set_level(self, level):
+            pass
+
+        def start_logger(self, config):
+            pass
+
+    monkeypatch.setattr(mod, "APP_CONFIG", SimpleNamespace(set=lambda *a, **kw: None))
+    monkeypatch.setattr(mod, "get_logger", _StubAppLog)
+    monkeypatch.setattr(mod, "RemoteLogger", lambda config: SimpleNamespace())
+    monkeypatch.setattr(mod.logging, "basicConfig", lambda **kw: None)
+    return mod
+
+
+CLI_REQUIRED_ARGS = [
+    "--url", "https://cloud.example.com", "-u", "u", "-p", "p", "-b", "4",
+    "--imap-user", "u", "--imap-password", "p",
+]
+
+
+class TestSyncCliRecurLabelPrefix:
+    def _spy_run(self, monkeypatch, mod):
+        calls = []
+
+        def spy(config):
+            calls.append(config)
+            return 0
+
+        monkeypatch.setattr(mod, "run", spy)
+        return calls
+
+    def test_empty_prefix_is_rejected_with_exit_code_2(self, monkeypatch, capsys):
+        mod = _load_sync_cli(monkeypatch)
+        calls = self._spy_run(monkeypatch, mod)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["nextcloud-deck-sync.py", *CLI_REQUIRED_ARGS, "--recur-label-prefix", ""],
+        )
+
+        assert mod.main() == 2
+        assert calls == []  # never reached the board
+        assert "--recur-label-prefix" in capsys.readouterr().err
+
+    def test_whitespace_only_prefix_is_rejected(self, monkeypatch):
+        mod = _load_sync_cli(monkeypatch)
+        calls = self._spy_run(monkeypatch, mod)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["nextcloud-deck-sync.py", *CLI_REQUIRED_ARGS, "--recur-label-prefix", "  "],
+        )
+
+        assert mod.main() == 2
+        assert calls == []
+
+    def test_prefix_flag_reaches_the_config(self, monkeypatch):
+        mod = _load_sync_cli(monkeypatch)
+        calls = self._spy_run(monkeypatch, mod)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["nextcloud-deck-sync.py", *CLI_REQUIRED_ARGS,
+             "--recur-label-prefix", "Gjenta:"],
+        )
+
+        assert mod.main() == 0
+        assert calls[0].recur_label_prefix == "Gjenta:"
+
+    def test_prefix_defaults_to_the_shared_constant(self, monkeypatch):
+        mod = _load_sync_cli(monkeypatch)
+        calls = self._spy_run(monkeypatch, mod)
+        monkeypatch.delenv("RECUR_LABEL_PREFIX", raising=False)
+        monkeypatch.setattr("sys.argv", ["nextcloud-deck-sync.py", *CLI_REQUIRED_ARGS])
+
+        assert mod.main() == 0
+        assert calls[0].recur_label_prefix == DEFAULT_LABEL_PREFIX
+
+    def test_prefix_reads_the_env_var(self, monkeypatch):
+        # Same env var nextcloud-deck-recur.py reads, so exporting it once in a
+        # wrapper configures both halves.
+        mod = _load_sync_cli(monkeypatch)
+        calls = self._spy_run(monkeypatch, mod)
+        monkeypatch.setenv("RECUR_LABEL_PREFIX", "Gjenta:")
+        monkeypatch.setattr("sys.argv", ["nextcloud-deck-sync.py", *CLI_REQUIRED_ARGS])
+
+        assert mod.main() == 0
+        assert calls[0].recur_label_prefix == "Gjenta:"
