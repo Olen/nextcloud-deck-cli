@@ -201,16 +201,16 @@ def pango_output(stacks: List[Stack], show_owner: bool, datefmt: str) -> str:
     lines: list[str] = []
     for s in stacks:
         title = pango_escape(s.title or f"List {s.id}")
-        lines.append(f"<b><span foreground='#1f6feb'>🗂 {title}</span></b>")
+        lines.append(f"🗂<b> <span size='large' foreground='#1f6feb' underline='single'>{title}</span></b>")
         if not s.cards:
             lines.append("<span foreground='#6e7781'>(no cards)</span>")
             continue
         for c in s.cards:
             t = pango_escape(c.title or "(untitled)")
-            line = f"• <b>{card_icon(s)} {t}</b>"
+            line = f"  <b>{card_icon(s)} {t}</b>"
             meta: list[str] = []
             if c.labels:
-                meta.append("🏷 " + ", ".join(pango_label(lb) for lb in c.labels))
+                meta.append("🏷 " + ",".join(pango_label(lb) for lb in c.labels))
             if show_owner and c.owner:
                 meta.append(
                     f"<span foreground='#58a6ff'>👤 {pango_escape(c.owner)}</span>"
@@ -228,8 +228,9 @@ def pango_output(stacks: List[Stack], show_owner: bool, datefmt: str) -> str:
             if c.archived:
                 meta.append("<span foreground='#6e7781'>📦 archived</span>")
             if meta:
-                line += "  " + "  ".join(meta)
+                line += " " + "  ".join(meta)
             lines.append(line)
+        lines.append(" ")
     return "\n".join(lines)
 
 
