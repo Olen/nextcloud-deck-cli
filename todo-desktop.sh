@@ -33,6 +33,9 @@ if [[ ! -f "$RUNTIME_TOKEN" ]]; then
     echo "1Password token not yet decrypted, skipping" >> /tmp/yubikey-gpg-refresh.log
     exit 0
 fi
+# The widget runs from gnome-shell, whose environment lacks the token; without it
+# op falls back to gpg-decrypting every ~/.secrets file on each refresh.
+export OP_CONNECT_TOKEN="$(cat "$RUNTIME_TOKEN")"
 
 PASSWORD=$(op --item=nextcloud-olen-deck-app-password --field=password)
 
