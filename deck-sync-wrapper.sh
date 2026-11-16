@@ -11,8 +11,9 @@ set -euo pipefail
 NC_OP_ITEM="${NC_OP_ITEM:-nextcloud-olen-deck-app-password}"
 IMAP_OP_ITEM="${IMAP_OP_ITEM:-olen lupus}"
 
-NEXTCLOUD_PASSWORD="$(op --item="$NC_OP_ITEM" --field=password)"
-IMAP_PASSWORD="$(op --item="$IMAP_OP_ITEM" --field=password)"
+. /usr/local/lib/op-env.sh
+NEXTCLOUD_PASSWORD="$(op_read "op://Vault/$NC_OP_ITEM/password")"
+IMAP_PASSWORD="$(op_read "op://Vault/$IMAP_OP_ITEM/password")"
 
 exec /home/olen/prog/nextcloud-deck-cli/nextcloud-deck-sync.py \
     --url "${NEXTCLOUD_BASE_URL:-https://cloud.olen.net/}" \
