@@ -10,7 +10,8 @@ set -euo pipefail
 # 1Password item name — adjust to match what you have in your vault.
 NC_OP_ITEM="${NC_OP_ITEM:-nextcloud-olen-deck-app-password}"
 
-NEXTCLOUD_PASSWORD="$(op --item="$NC_OP_ITEM" --field=password)"
+. /usr/local/lib/op-env.sh
+NEXTCLOUD_PASSWORD="$(op_read "op://Vault/$NC_OP_ITEM/password")"
 
 exec /home/olen/prog/nextcloud-deck-cli/nextcloud-deck-recur.py \
     --url "${NEXTCLOUD_BASE_URL:-https://cloud.olen.net/}" \

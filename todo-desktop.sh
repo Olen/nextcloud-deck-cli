@@ -33,10 +33,9 @@ if [[ ! -f "$RUNTIME_TOKEN" ]]; then
     echo "1Password token not yet decrypted, skipping" >> /tmp/yubikey-gpg-refresh.log
     exit 0
 fi
-# The widget runs from gnome-shell, whose environment lacks the token; without it
-# op falls back to gpg-decrypting every ~/.secrets file on each refresh.
-export OP_CONNECT_TOKEN="$(cat "$RUNTIME_TOKEN")"
 
-PASSWORD=$(op --item=nextcloud-olen-deck-app-password --field=password)
+# op_read takes the token from the runtime file; gnome-shell's environment doesn't have it
+. /usr/local/lib/op-env.sh
+PASSWORD=$(op_read "op://Vault/nextcloud-olen-deck-app-password/password")
 
 /home/olen/prog/nextcloud-deck-cli/nextcloud-deck-list.py --url https://cloud.olen.net/ -u olen -p "$PASSWORD" -b 4 --pango
